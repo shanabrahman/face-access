@@ -1,0 +1,18 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Staff faces and access logs are personal data
+staff/*
+!staff/.gitkeep
+entries.csv
+admin.json
+settings.json
+attendance.db
+attendance.db-shm
+attendance.db-wal
+attendance_photos/
+correction_documents/
+Face-Access-*.zip
