@@ -7,7 +7,6 @@ import os
 import re
 import psycopg
 from contextlib import contextmanager
-from psycopg.rows import dict_row
 from datetime import date, datetime, time as datetime_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -125,8 +124,12 @@ class _HybridRow(dict):
 
 
 def _hybrid_row(cursor):
-    names = [column.name for column in cursor.description]
-    return lambda values: _HybridRow(zip(names, values))
+    # psycopg creates the row maker before query execution, so read column
+    # names lazily when the first result row is materialized.
+    return lambda values: _HybridRow(
+        (column.name, value)
+        for column, value in zip(cursor.description, values)
+    )
 
 
 def _qmark_to_format(sql):
