@@ -95,3 +95,20 @@ def create_signed_url(bucket: str, path: str, expires_in: int = 60) -> str:
     if not signed:
         raise RuntimeError("Supabase did not return a signed storage URL.")
     return signed
+
+
+def list_objects(bucket: str, prefix: str = "") -> list[dict]:
+    """List private objects under a validated folder prefix."""
+    if prefix:
+        clean = _safe_object_path(prefix)
+    else:
+        clean = ""
+    return _bucket(bucket).list(clean)
+
+
+def move_object(bucket: str, source: str, destination: str) -> str:
+    """Move an object within the same private bucket."""
+    source_path = _safe_object_path(source)
+    destination_path = _safe_object_path(destination)
+    _bucket(bucket).move(source_path, destination_path)
+    return destination_path
