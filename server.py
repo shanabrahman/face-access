@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 import database as attendance_db
 import chatbot_service
+import storage as face_storage
 
 # ---------- Settings ----------
 DET_MODEL = "models/face_detection_yunet_2023mar.onnx"
@@ -206,7 +207,74 @@ def largest_face_embedding(img):
     return embed(img, face)
 
 
+def _supabase_storage_enabled():
+    return bool(
+        os.environ.get("SUPABASE_URL", "").strip()
+        and os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    )
+
+
+def _staff_storage_prefix(name):
+    if not valid_name(name):
+        raise ValueError("Invalid employee name for storage path.")
+    return name.strip()
+
+
+def _load_staff_from_storage():
+    db = {}
+    folders = face_storage.list_objects(face_storage.BUCKET_EMPLOYEE_FACES)
+    for folder in sorted(item.get("name", "") for item in folders if item.get("name")):
+        samples = []
+        prefix = _staff_storage_prefix(folder)
+        objects = face_storage.list_objects(face_storage.BUCKET_EMPLOYEE_FACES, prefix)
+        for item in sorted(objects, key=lambda entry: entry.get("name", "")):
+            filename = item.get("name", "")
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in IMG_EXT + VID_EXT:
+                continue
+            object_path = f"{prefix}/{filename}"
+            content = face_storage.download_bytes(
+                face_storage.BUCKET_EMPLOYEE_FACES, object_path
+            )
+            if ext in IMG_EXT:
+                img = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    embedding = largest_face_embedding(img)
+                    if embedding is not None:
+                        samples.append(embedding)
+            else:
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as temp:
+                        temp.write(content)
+                        temp_path = temp.name
+                    cap = cv2.VideoCapture(temp_path)
+                    i = taken = 0
+                    while taken < MAX_VIDEO_SAMPLES:
+                        ok, frame = cap.read()
+                        if not ok:
+                            break
+                        if i % VIDEO_STEP == 0:
+                            embedding = largest_face_embedding(frame)
+                            if embedding is not None:
+                                samples.append(embedding)
+                                taken += 1
+                        i += 1
+                    cap.release()
+                finally:
+                    if temp_path and os.path.exists(temp_path):
+                        os.remove(temp_path)
+        if samples:
+            db[prefix] = np.stack(samples)
+            print(f"Loaded {prefix}: {len(samples)} face samples from Supabase Storage")
+        else:
+            print(f"WARNING: no face found for {prefix}")
+    return db
+
+
 def load_staff():
+    if _supabase_storage_enabled():
+        return _load_staff_from_storage()
     db = {}
     os.makedirs(STAFF_DIR, exist_ok=True)
     for name in sorted(os.listdir(STAFF_DIR)):
