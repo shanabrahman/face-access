@@ -25,8 +25,8 @@ def main():
     args = parser.parse_args()
 
     dsn = os.environ.get("DATABASE_URL", "").strip()
-    if not dsn:
-        raise SystemExit("DATABASE_URL is required.")
+    if args.apply and not dsn:
+        raise SystemExit("DATABASE_URL is required when --apply is used.")
     if not STAFF_DIR.is_dir():
         raise SystemExit(f"Staff directory not found: {STAFF_DIR}")
 
