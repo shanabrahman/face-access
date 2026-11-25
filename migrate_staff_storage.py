@@ -4,6 +4,7 @@ Run from the project root after configuring DATABASE_URL, SUPABASE_URL, and
 SUPABASE_SERVICE_ROLE_KEY. Defaults to dry-run; pass --apply to upload files.
 """
 import argparse
+import mimetypes
 import os
 from pathlib import Path
 
@@ -52,27 +53,22 @@ def main():
                 "SELECT employee_id, profile_photo FROM employees WHERE face_name = %s",
                 (employee_name,),
             ).fetchone()
-            if employee is None:
-                print(f"SKIP {employee_name}: no matching employee record in Supabase.")
-                continue
-            content_type = (
-                "image/jpeg" if file_path.suffix.lower() in {".jpg", ".jpeg"}
-                else "image/png" if file_path.suffix.lower() == ".png"
-                else "video/mp4"
-            )
+            guessed_type, _ = mimetypes.guess_type(file_path.name)
+            content_type = guessed_type or "application/octet-stream"
             storage.upload_bytes(
                 storage.BUCKET_EMPLOYEE_FACES, object_path,
                 file_path.read_bytes(), content_type, upsert=True,
             )
             # Preserve an existing profile-photo choice if it already points
             # to an object in Supabase; otherwise use the first uploaded image.
-            current_photo = employee[1] or ""
-            if not current_photo or os.path.isabs(current_photo) or current_photo.startswith("staff/"):
-                if file_path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
-                    db.execute(
-                        "UPDATE employees SET profile_photo = %s WHERE employee_id = %s",
-                        (object_path, employee[0]),
-                    )
+            if employee is not None:
+                current_photo = employee[1] or ""
+                if not current_photo or os.path.isabs(current_photo) or current_photo.startswith("staff/"):
+                    if file_path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                        db.execute(
+                            "UPDATE employees SET profile_photo = %s WHERE employee_id = %s",
+                            (object_path, employee[0]),
+                        )
             uploaded += 1
             print(f"UPLOADED {employee_name}/{file_path.name}")
     print(f"Migration complete: {uploaded} file(s) uploaded.")
