@@ -1719,13 +1719,22 @@ def staff_details(request: Request):
     ensure_admin(request)
     result = []
     for name in sorted(STAFF):
-        folder = os.path.join(STAFF_DIR, name)
         meta = STAFF_META.get(name, default_meta())
-        files = sorted(
-            file for file in os.listdir(folder)
-            if os.path.isfile(os.path.join(folder, file))
-            and os.path.splitext(file)[1].lower() in IMG_EXT + VID_EXT
-        )
+        if _supabase_storage_enabled():
+            objects = face_storage.list_objects(
+                face_storage.BUCKET_EMPLOYEE_FACES, _staff_storage_prefix(name)
+            )
+            files = sorted(
+                item.get("name", "") for item in objects
+                if os.path.splitext(item.get("name", ""))[1].lower() in IMG_EXT + VID_EXT
+            )
+        else:
+            folder = os.path.join(STAFF_DIR, name)
+            files = sorted(
+                file for file in os.listdir(folder)
+                if os.path.isfile(os.path.join(folder, file))
+                and os.path.splitext(file)[1].lower() in IMG_EXT + VID_EXT
+            )
         result.append({
             "name": name,
             "samples": len(STAFF[name]),
@@ -1801,13 +1810,21 @@ def add_staff(
     ok, encoded = cv2.imencode(".jpg", img)
     if not ok:
         raise HTTPException(status_code=400, detail="Could not process that photo.")
-    folder = os.path.join(STAFF_DIR, name)
-    os.makedirs(folder, exist_ok=True)
-    image_path = os.path.join(folder, f"{uuid.uuid4().hex}.jpg")
-    with open(image_path, "xb") as image_file:
-        image_file.write(encoded.tobytes())
-    if os.name == "posix":
-        os.chmod(image_path, 0o600)
+    filename = f"{uuid.uuid4().hex}.jpg"
+    if _supabase_storage_enabled():
+        image_path = f"{_staff_storage_prefix(name)}/{filename}"
+        face_storage.upload_bytes(
+            face_storage.BUCKET_EMPLOYEE_FACES, image_path,
+            encoded.tobytes(), "image/jpeg",
+        )
+    else:
+        folder = os.path.join(STAFF_DIR, name)
+        os.makedirs(folder, exist_ok=True)
+        image_path = os.path.join(folder, filename)
+        with open(image_path, "xb") as image_file:
+            image_file.write(encoded.tobytes())
+        if os.name == "posix":
+            os.chmod(image_path, 0o600)
     try:
         employee_id = attendance_db.upsert_enrolled_employee(
             name,
@@ -1822,7 +1839,10 @@ def add_staff(
             },
         )
     except Exception:
-        os.remove(image_path)
+        if _supabase_storage_enabled():
+            face_storage.delete_objects(face_storage.BUCKET_EMPLOYEE_FACES, [image_path])
+        elif os.path.exists(image_path):
+            os.remove(image_path)
         raise
     with lock:
         samples = list(STAFF.get(name, []))
