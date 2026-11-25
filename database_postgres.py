@@ -664,8 +664,15 @@ def set_employee_face_name(old_name, new_name, database_path=DATABASE_FILE):
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     with connection(database_path) as db:
         cursor = db.execute(
-            "UPDATE employees SET face_name = ?, full_name = ?, updated_at = ? WHERE face_name = ?",
-            (new_name, new_name, now, old_name),
+            """UPDATE employees
+               SET face_name = ?, full_name = ?, updated_at = ?,
+                   profile_photo = CASE
+                       WHEN left(profile_photo, length(?) + 1) = ? || '/'
+                       THEN ? || substr(profile_photo, length(?) + 1)
+                       ELSE profile_photo
+                   END
+               WHERE face_name = ?""",
+            (new_name, new_name, now, old_name, old_name, new_name, old_name, old_name),
         )
         return cursor.rowcount > 0
 
