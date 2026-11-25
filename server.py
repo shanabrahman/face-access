@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import psycopg
 import subprocess
 import sys
 import tempfile
@@ -1099,7 +1100,7 @@ def create_hod_account(data: HODAccountCreate, request: Request):
         hod_id = attendance_db.create_hod_account(
             full_name, email, department, salt, password_hash
         )
-    except sqlite3.IntegrityError as exc:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError) as exc:
         raise HTTPException(status_code=409, detail="A HOD account already uses that email.") from exc
     return {"ok": True, "hod_id": hod_id}
 
@@ -1128,7 +1129,7 @@ def update_hod_account(hod_id: str, data: HODAccountUpdate, request: Request):
     try:
         if not attendance_db.update_hod_account(hod_id, updates):
             raise HTTPException(status_code=404, detail="HOD account not found.")
-    except sqlite3.IntegrityError as exc:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError) as exc:
         raise HTTPException(status_code=409, detail="A HOD account already uses that email.") from exc
     if "password_hash" in updates or updates.get("is_active") == 0:
         revoke_hod_sessions(hod_id)
@@ -1965,7 +1966,7 @@ def create_employee_account(
         created = attendance_db.create_employee_account(
             data.employee_id, salt, password_hash, data.annual_leave_days
         )
-    except sqlite3.IntegrityError as exc:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError) as exc:
         raise HTTPException(
             status_code=409, detail="An employee login account already exists."
         ) from exc
@@ -2285,7 +2286,7 @@ def attendance_clock(data: AttendanceClock):
         except OSError as cleanup_error:
             print(f"Could not remove unreferenced attendance photo: {cleanup_error}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, psycopg.Error) as exc:
         try:
             remove_attendance_photo_file(photo_path)
         except OSError as cleanup_error:
@@ -3441,7 +3442,7 @@ def add_shift(data: ShiftCreate, request: Request):
             data.standard_work_hours,
             on_time_window_minutes=data.on_time_window_minutes,
         )
-    except sqlite3.IntegrityError as exc:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError) as exc:
         raise HTTPException(status_code=409, detail="A shift with that name already exists.") from exc
     return {"shift_id": shift_id}
 
