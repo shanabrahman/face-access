@@ -207,7 +207,7 @@ class _PostgresConnection:
         ignore_insert = bool(re.search(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", sql, re.I))
         sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", sql, flags=re.I)
         sql = re.sub(r"\bCOLLATE\s+NOCASE\b", "", sql, flags=re.I)
-        sql = re.sub(r"\bGLOB\s+'EMP-\[0-9\]\*'", "LIKE 'EMP-%'", sql, flags=re.I)
+        sql = re.sub(r"\bGLOB\s+'([A-Z]+)-\[0-9\]\*'", lambda m: "LIKE '" + m.group(1) + "-%'", sql, flags=re.I)
         if ignore_insert and not re.search(r"\bON\s+CONFLICT\b", sql, re.I):
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
         sql = _qmark_to_format(sql)
@@ -665,7 +665,7 @@ def sync_legacy_staff(staff, staff_meta, database_path=DATABASE_FILE):
             db.execute(
                 """INSERT OR IGNORE INTO employees
                    (employee_id, face_name, full_name, shift_id, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING notification_id""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (_next_employee_id(db), name, name, default_shift["shift_id"], status, now, now),
             )
             db.execute(
@@ -712,7 +712,7 @@ def import_legacy_entries(csv_path, database_path=DATABASE_FILE):
                 cursor = db.execute(
                     """INSERT OR IGNORE INTO access_events
                        (source_key, time, event, status, name, score, method, details)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING meeting_id""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (source_key, *normalized.values()),
                 )
                 imported += cursor.rowcount
@@ -1075,7 +1075,7 @@ def create_shift(name, start_time, end_time, grace_period_minutes, standard_work
                 on_time_window_minutes, standard_work_hours,
             ),
         )
-        return cursor.lastrowid
+        return cursor.fetchone()[0]
 
 
 def update_shift_times(shift_id, start_time, end_time, database_path=DATABASE_FILE):
@@ -1194,7 +1194,7 @@ def create_leave_request(employee_id, start_date, end_date, reason,
                 datetime.now(ZoneInfo("Asia/Qatar")).isoformat(timespec="seconds"),
             ),
         )
-        return cursor.lastrowid
+        return cursor.fetchone()[0]
 
 
 def leave_requests(database_path=DATABASE_FILE, employee_id=""):
@@ -1282,7 +1282,7 @@ def create_attendance_correction_request(
                 now,
             ),
         )
-        correction_id = cursor.lastrowid
+        correction_id = cursor.fetchone()[0]
         db.execute(
             """INSERT INTO attendance_correction_audit
                (correction_id, action, actor_id, actor_name, actor_role, details, created_at)
@@ -1505,11 +1505,11 @@ def create_offsite_meeting(employee_id, attendance_date, departure_time,
             """INSERT INTO offsite_meeting_records
                (employee_id, attendance_date, departure_time, return_time,
                 meeting_title, meeting_details, location, submitted_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING meeting_id""",
             (employee_id, attendance_date, departure_time, return_time or None,
              meeting_title, meeting_details, location, now),
         )
-        meeting_id = cursor.lastrowid
+        meeting_id = cursor.fetchone()[0]
         return meeting_id
 
 
@@ -1591,10 +1591,10 @@ def add_notification(recipient_role, recipient_id, employee_id, category, title,
         cursor = db.execute(
             """INSERT INTO app_notifications
                (recipient_role, recipient_id, employee_id, category, title, message, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING notification_id""",
             (recipient_role, recipient_id, employee_id, category, title, message, now),
         )
-        return cursor.lastrowid
+        return cursor.fetchone()[0]
 
 
 def notifications(recipient_role, recipient_id="", database_path=DATABASE_FILE):
@@ -1855,7 +1855,7 @@ def record_attendance(employee_id, action, now=None, timezone_name="Asia/Qatar",
                     raise FileExistsError(
                         "Attendance has already been checked in for this shift."
                     ) from exc
-                attendance_id = cursor.lastrowid
+                attendance_id = cursor.fetchone()[0]
         else:
             existing = db.execute(
                 """SELECT * FROM attendance WHERE employee_id = ? AND check_out IS NULL
