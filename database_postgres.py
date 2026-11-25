@@ -206,6 +206,7 @@ class _PostgresConnection:
 
         ignore_insert = bool(re.search(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", sql, re.I))
         sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", sql, flags=re.I)
+        sql = re.sub(r"=\s*\?\s+COLLATE\s+NOCASE", "ILIKE ?", sql, flags=re.I)
         sql = re.sub(r"\bCOLLATE\s+NOCASE\b", "", sql, flags=re.I)
         sql = re.sub(r"\bGLOB\s+'([A-Z]+)-\[0-9\]\*'", lambda m: "LIKE '" + m.group(1) + "-%'", sql, flags=re.I)
         if ignore_insert and not re.search(r"\bON\s+CONFLICT\b", sql, re.I):
