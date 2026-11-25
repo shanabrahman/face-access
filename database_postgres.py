@@ -237,6 +237,7 @@ def connection(database_path=DATABASE_FILE):
     raw = psycopg.connect(
         dsn,
         sslmode=os.environ.get("PGSSLMODE", "require"),
+        prepare_threshold=None,
         row_factory=_hybrid_row,
     )
     db = _PostgresConnection(raw)
