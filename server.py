@@ -1885,19 +1885,53 @@ def rename_staff(data: RenameStaff, request: Request):
         raise HTTPException(status_code=404, detail="Staff member not found.")
     if not valid_name(new_name):
         raise HTTPException(status_code=400, detail="Please enter a valid staff name.")
-    if new_name != old_name and (new_name in STAFF or os.path.exists(os.path.join(STAFF_DIR, new_name))):
+    if new_name != old_name and (
+        new_name in STAFF or (
+            not _supabase_storage_enabled()
+            and os.path.exists(os.path.join(STAFF_DIR, new_name))
+        )
+    ):
         raise HTTPException(status_code=409, detail="A staff member with that name already exists.")
     if old_name != new_name:
-        old_folder = os.path.join(STAFF_DIR, old_name)
-        new_folder = os.path.join(STAFF_DIR, new_name)
-        if os.path.islink(old_folder) or os.path.commonpath([os.path.realpath(STAFF_DIR), os.path.realpath(old_folder)]) != os.path.realpath(STAFF_DIR):
-            raise HTTPException(status_code=400, detail="Staff folder is not a safe path.")
-        os.rename(old_folder, new_folder)
-        try:
-            attendance_db.set_employee_face_name(old_name, new_name)
-        except Exception:
-            os.rename(new_folder, old_folder)
-            raise
+        if _supabase_storage_enabled():
+            old_prefix = _staff_storage_prefix(old_name)
+            new_prefix = _staff_storage_prefix(new_name)
+            objects = face_storage.list_objects(
+                face_storage.BUCKET_EMPLOYEE_FACES, old_prefix
+            )
+            moved = []
+            try:
+                for item in objects:
+                    filename = item.get("name", "")
+                    if not filename:
+                        continue
+                    source = f"{old_prefix}/{filename}"
+                    destination = f"{new_prefix}/{filename}"
+                    face_storage.move_object(
+                        face_storage.BUCKET_EMPLOYEE_FACES, source, destination
+                    )
+                    moved.append((source, destination))
+                attendance_db.set_employee_face_name(old_name, new_name)
+            except Exception:
+                for source, destination in reversed(moved):
+                    try:
+                        face_storage.move_object(
+                            face_storage.BUCKET_EMPLOYEE_FACES, destination, source
+                        )
+                    except Exception:
+                        pass
+                raise
+        else:
+            old_folder = os.path.join(STAFF_DIR, old_name)
+            new_folder = os.path.join(STAFF_DIR, new_name)
+            if os.path.islink(old_folder) or os.path.commonpath([os.path.realpath(STAFF_DIR), os.path.realpath(old_folder)]) != os.path.realpath(STAFF_DIR):
+                raise HTTPException(status_code=400, detail="Staff folder is not a safe path.")
+            os.rename(old_folder, new_folder)
+            try:
+                attendance_db.set_employee_face_name(old_name, new_name)
+            except Exception:
+                os.rename(new_folder, old_folder)
+                raise
         with lock:
             STAFF[new_name] = STAFF.pop(old_name)
             STAFF_META[new_name] = STAFF_META.pop(old_name, default_meta())
@@ -1918,11 +1952,20 @@ def delete_staff_photo(data: RemovePhoto, request: Request):
         raise HTTPException(status_code=404, detail="Photo not found.")
     if os.path.splitext(data.file)[1].lower() not in IMG_EXT + VID_EXT:
         raise HTTPException(status_code=400, detail="Unsupported sample type.")
-    folder = os.path.join(STAFF_DIR, data.name)
-    path = os.path.join(folder, data.file)
-    if not os.path.isfile(path) or os.path.islink(path):
-        raise HTTPException(status_code=404, detail="Photo not found.")
-    os.remove(path)
+    if _supabase_storage_enabled():
+        object_path = f"{_staff_storage_prefix(data.name)}/{data.file}"
+        objects = face_storage.list_objects(
+            face_storage.BUCKET_EMPLOYEE_FACES, _staff_storage_prefix(data.name)
+        )
+        if not any(item.get("name") == data.file for item in objects):
+            raise HTTPException(status_code=404, detail="Photo not found.")
+        face_storage.delete_objects(face_storage.BUCKET_EMPLOYEE_FACES, [object_path])
+    else:
+        folder = os.path.join(STAFF_DIR, data.name)
+        path = os.path.join(folder, data.file)
+        if not os.path.isfile(path) or os.path.islink(path):
+            raise HTTPException(status_code=404, detail="Photo not found.")
+        os.remove(path)
     with lock:
         loaded = load_staff()
         STAFF = loaded
@@ -1944,11 +1987,17 @@ def delete_staff(data: DeleteStaff, request: Request):
     name = data.name
     if name not in STAFF:
         raise HTTPException(status_code=404, detail="Staff member not found.")
-    folder = os.path.join(STAFF_DIR, name)
-    staff_root = os.path.realpath(STAFF_DIR)
-    if os.path.islink(folder) or os.path.commonpath([staff_root, os.path.realpath(folder)]) != staff_root:
-        raise HTTPException(status_code=400, detail="Staff folder is not a safe path.")
-    shutil.rmtree(folder)
+    if _supabase_storage_enabled():
+        prefix = _staff_storage_prefix(name)
+        objects = face_storage.list_objects(face_storage.BUCKET_EMPLOYEE_FACES, prefix)
+        paths = [f"{prefix}/{item['name']}" for item in objects if item.get("name")]
+        face_storage.delete_objects(face_storage.BUCKET_EMPLOYEE_FACES, paths)
+    else:
+        folder = os.path.join(STAFF_DIR, name)
+        staff_root = os.path.realpath(STAFF_DIR)
+        if os.path.islink(folder) or os.path.commonpath([staff_root, os.path.realpath(folder)]) != staff_root:
+            raise HTTPException(status_code=400, detail="Staff folder is not a safe path.")
+        shutil.rmtree(folder)
     with lock:
         STAFF.pop(name, None)
         STAFF_META[name] = {**STAFF_META.get(name, default_meta()), "active": False}
