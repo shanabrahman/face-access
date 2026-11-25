@@ -210,7 +210,7 @@ class _PostgresConnection:
         if ignore_insert and not re.search(r"\bON\s+CONFLICT\b", sql, re.I):
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
         sql = _qmark_to_format(sql)
-        return self.raw.execute(sql, params or ())
+        return self.raw.execute(sql, params)
 
     def executemany(self, sql, seq_of_params):
         ignore_insert = bool(re.search(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", sql, re.I))
