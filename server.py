@@ -2071,6 +2071,22 @@ def hr_employee_profile_photo(employee_id: str, request: Request):
     employee = attendance_db.employee_by_id(employee_id)
     if employee is None:
         raise HTTPException(status_code=404, detail="Employee not found.")
+    if _supabase_storage_enabled():
+        object_path = employee.get("profile_photo") or ""
+        try:
+            content = face_storage.download_bytes(
+                face_storage.BUCKET_EMPLOYEE_FACES, object_path
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Profile photo is unavailable.") from exc
+        return Response(
+            content=content,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     path = safe_profile_photo_path(employee)
     if path is None:
         raise HTTPException(status_code=404, detail="Profile photo is unavailable.")
