@@ -4,12 +4,10 @@ import hashlib
 import json
 import math
 import os
-import os
 import re
 import psycopg
 from contextlib import contextmanager
 from psycopg.rows import dict_row
-from contextlib import contextmanager
 from datetime import date, datetime, time as datetime_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -217,6 +215,7 @@ class _PostgresConnection:
     def executemany(self, sql, seq_of_params):
         ignore_insert = bool(re.search(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", sql, re.I))
         sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", sql, flags=re.I)
+        sql = re.sub(r"=\s*\?\s+COLLATE\s+NOCASE", "ILIKE ?", sql, flags=re.I)
         sql = re.sub(r"\bCOLLATE\s+NOCASE\b", "", sql, flags=re.I)
         if ignore_insert and not re.search(r"\bON\s+CONFLICT\b", sql, re.I):
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
