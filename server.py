@@ -973,13 +973,15 @@ ACCESS_COOLDOWNS.update(load_recent_access_cooldowns())
 attendance_db.initialize_database()
 attendance_db.sync_legacy_staff(STAFF, STAFF_META)
 attendance_db.import_legacy_entries(LOG_FILE)
-os.makedirs(ATTENDANCE_PHOTO_DIR, mode=0o700, exist_ok=True)
-if os.name == "posix":
-    os.chmod(ATTENDANCE_PHOTO_DIR, 0o700)
+if not os.environ.get("DATABASE_URL"):
+    os.makedirs(ATTENDANCE_PHOTO_DIR, mode=0o700, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(ATTENDANCE_PHOTO_DIR, 0o700)
 apply_attendance_photo_retention()
-os.makedirs(CORRECTION_DOCUMENT_DIR, mode=0o700, exist_ok=True)
-if os.name == "posix":
-    os.chmod(CORRECTION_DOCUMENT_DIR, 0o700)
+if not os.environ.get("DATABASE_URL"):
+    os.makedirs(CORRECTION_DOCUMENT_DIR, mode=0o700, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(CORRECTION_DOCUMENT_DIR, 0o700)
 attendance_db.detect_missing_checkouts(database_path=attendance_db.DATABASE_FILE)
 THRESHOLD = float(attendance_db.settings()["face_threshold"])
 print(f"Ready: {len(STAFF)} staff loaded. Open http://localhost:8000")
@@ -2945,15 +2947,29 @@ def submit_employee_correction_request(
         if len(document_bytes) > MAX_ATTENDANCE_PHOTO_BYTES:
             raise HTTPException(status_code=413, detail="Supporting document is too large.")
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", data.supporting_document_name)[-255:]
-        os.makedirs(CORRECTION_DOCUMENT_DIR, mode=0o700, exist_ok=True)
-        document_path = os.path.join(
-            CORRECTION_DOCUMENT_DIR,
-            f"{uuid.uuid4().hex}-{safe_name}",
-        )
-        with open(document_path, "xb") as document_file:
-            document_file.write(document_bytes)
-        if os.name == "posix":
-            os.chmod(document_path, 0o600)
+        document_filename = f"{uuid.uuid4().hex}-{safe_name}"
+        if os.environ.get("DATABASE_URL"):
+            document_path = f"corrections/{employee['employee_id']}/{document_filename}"
+            extension = os.path.splitext(safe_name)[1].lower()
+            content_type = {
+                ".pdf": "application/pdf",
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+            }.get(extension, "application/octet-stream")
+            face_storage.upload_bytes(
+                face_storage.BUCKET_CORRECTION_DOCUMENTS,
+                document_path,
+                document_bytes,
+                content_type,
+            )
+        else:
+            os.makedirs(CORRECTION_DOCUMENT_DIR, mode=0o700, exist_ok=True)
+            document_path = os.path.join(CORRECTION_DOCUMENT_DIR, document_filename)
+            with open(document_path, "xb") as document_file:
+                document_file.write(document_bytes)
+            if os.name == "posix":
+                os.chmod(document_path, 0o600)
     correction_id = attendance_db.create_attendance_correction_request(
         employee["employee_id"], data.attendance_date,
         data.requested_check_in, data.requested_check_out,
@@ -2962,9 +2978,14 @@ def submit_employee_correction_request(
     if correction_id is None:
         if document_path:
             try:
-                os.remove(document_path)
-            except OSError:
-                pass
+                if os.environ.get("DATABASE_URL"):
+                    face_storage.delete_objects(
+                        face_storage.BUCKET_CORRECTION_DOCUMENTS, [document_path]
+                    )
+                elif os.path.exists(document_path):
+                    os.remove(document_path)
+            except Exception as cleanup_error:
+                print(f"Could not remove unreferenced correction document: {cleanup_error}")
         raise HTTPException(status_code=409, detail="A pending or approved correction already exists for this attendance date.")
     employee_name = employee["full_name"]
     attendance_db.add_notification(
