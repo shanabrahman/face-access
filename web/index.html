@@ -4065,6 +4065,21 @@ function stopCamera() {
   setStatus('Camera off');
 }
 
+function speakAttendanceAnnouncement(messages) {
+  if (!('speechSynthesis' in window) || !messages.length) return;
+  const announcement = messages.join('. ');
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(announcement);
+    utterance.lang = 'en-US';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  } catch (error) {
+    console.warn('Voice announcement is unavailable in this browser:', error);
+  }
+}
+
 async function blobToBase64(blob) {
   if (!(blob instanceof Blob)) throw new Error('Could not capture the live attendance frame.');
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -4278,6 +4293,9 @@ async function decide(faces, frameBlob) {
         ...failures.map(result => `${result.name}: ${result.message}`)
       ];
       setStatus(messages.join(' '), attendanceStatusTone(results));
+      if (successes.length > 0) {
+        speakAttendanceAnnouncement(successes.map(result => result.message));
+      }
       window.alert(messages.join('\n'));
       if (successes.length > 0) {
         loadDashboard();
