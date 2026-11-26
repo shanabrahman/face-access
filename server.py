@@ -1833,72 +1833,78 @@ def hod_report_export(request: Request, period: Literal["daily", "weekly", "mont
 
 @app.post("/recognize")
 def recognize(file: UploadFile = File(...)):
-    request_started = time.perf_counter()
-    raw_data = file.file.read(MAX_IMAGE_BYTES + 1)
-    if len(raw_data) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Image must be 10 MB or smaller.")
-    data = np.frombuffer(raw_data, np.uint8)
-    img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
-    if img is None:
-        raise HTTPException(status_code=400, detail="Could not read the image.")
-    if img.shape[0] * img.shape[1] > 40_000_000:
-        raise HTTPException(status_code=413, detail="Image dimensions are too large.")
-    decode_ms = (time.perf_counter() - request_started) * 1000
-    results = []
-    model_started = time.perf_counter()
-    employee_lookup_ms = 0.0
-    proof_save_ms = 0.0
-    with lock:
-        now = time.time()
-        if not os.environ.get("DATABASE_URL"):
-            for name, expires in list(ACCESS_COOLDOWNS.items()):
-                if expires <= now:
-                    ACCESS_COOLDOWNS.pop(name, None)
-        for face in detect(img):
-            name, score = identify(embed(img, face))
-            recognized_at = time.time()
-            reason = access_reason(name)
-            cooldown_remaining = access_cooldown_remaining(name, now)
-            x, y, w, h = [int(v) for v in face[:4]]
-            result = {
-                "name": name,
-                "score": round(score, 3),
-                "allowed": reason is None and cooldown_remaining == 0,
-                "reason": reason or "",
-                "cooldown": reason is None and cooldown_remaining > 0,
-                "cooldown_remaining": cooldown_remaining,
-                "liveness_verified": False,
-                "liveness_score": None,
-                "liveness_status": "photo_check_required",
-                "box": [x, y, w, h],
-            }
-            employee_lookup_started = time.perf_counter()
-            employee = attendance_db.employee_by_face_name(name) if name != "Unknown" else None
-            employee_lookup_ms += (time.perf_counter() - employee_lookup_started) * 1000
-            result["employee_id"] = employee["employee_id"] if employee else ""
-            result["attendance_allowed"] = bool(
-                employee
-                and employee["status"] == "active"
-                and employee["consent_at"]
-            )
-            if reason is None and cooldown_remaining == 0:
-                proof_started = time.perf_counter()
-                result["proof"] = issue_recognition_proof(name, score, recognized_at)
-                proof_save_ms += (time.perf_counter() - proof_started) * 1000
-            elif name != "Unknown" and STAFF_META.get(name, default_meta()).get("active", True):
-                proof_started = time.perf_counter()
-                result["proof"] = issue_recognition_proof(name, score, recognized_at)
-                proof_save_ms += (time.perf_counter() - proof_started) * 1000
-            results.append(result)
-    model_ms = (time.perf_counter() - model_started) * 1000
-    total_ms = (time.perf_counter() - request_started) * 1000
-    print(
-        f"[PERF] /recognize total_ms={total_ms:.1f} decode_ms={decode_ms:.1f} "
-        f"face_model_ms={model_ms:.1f} employee_lookup_ms={employee_lookup_ms:.1f} "
-        f"proof_save_ms={proof_save_ms:.1f} faces={len(results)}"
-    )
-    return {"faces": results}
-
+    try:
+        request_started = time.perf_counter()
+        raw_data = file.file.read(MAX_IMAGE_BYTES + 1)
+        if len(raw_data) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Image must be 10 MB or smaller.")
+        data = np.frombuffer(raw_data, np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
+        if img is None:
+            raise HTTPException(status_code=400, detail="Could not read the image.")
+        if img.shape[0] * img.shape[1] > 40_000_000:
+            raise HTTPException(status_code=413, detail="Image dimensions are too large.")
+        decode_ms = (time.perf_counter() - request_started) * 1000
+        results = []
+        model_started = time.perf_counter()
+        employee_lookup_ms = 0.0
+        proof_save_ms = 0.0
+        with lock:
+            now = time.time()
+            if not os.environ.get("DATABASE_URL"):
+                for name, expires in list(ACCESS_COOLDOWNS.items()):
+                    if expires <= now:
+                        ACCESS_COOLDOWNS.pop(name, None)
+            for face in detect(img):
+                name, score = identify(embed(img, face))
+                recognized_at = time.time()
+                reason = access_reason(name)
+                cooldown_remaining = access_cooldown_remaining(name, now)
+                x, y, w, h = [int(v) for v in face[:4]]
+                result = {
+                    "name": name,
+                    "score": round(score, 3),
+                    "allowed": reason is None and cooldown_remaining == 0,
+                    "reason": reason or "",
+                    "cooldown": reason is None and cooldown_remaining > 0,
+                    "cooldown_remaining": cooldown_remaining,
+                    "liveness_verified": False,
+                    "liveness_score": None,
+                    "liveness_status": "photo_check_required",
+                    "box": [x, y, w, h],
+                }
+                employee_lookup_started = time.perf_counter()
+                employee = attendance_db.employee_by_face_name(name) if name != "Unknown" else None
+                employee_lookup_ms += (time.perf_counter() - employee_lookup_started) * 1000
+                result["employee_id"] = employee["employee_id"] if employee else ""
+                result["attendance_allowed"] = bool(
+                    employee
+                    and employee["status"] == "active"
+                    and employee["consent_at"]
+                )
+                if reason is None and cooldown_remaining == 0:
+                    proof_started = time.perf_counter()
+                    result["proof"] = issue_recognition_proof(name, score, recognized_at)
+                    proof_save_ms += (time.perf_counter() - proof_started) * 1000
+                elif name != "Unknown" and STAFF_META.get(name, default_meta()).get("active", True):
+                    proof_started = time.perf_counter()
+                    result["proof"] = issue_recognition_proof(name, score, recognized_at)
+                    proof_save_ms += (time.perf_counter() - proof_started) * 1000
+                results.append(result)
+        model_ms = (time.perf_counter() - model_started) * 1000
+        total_ms = (time.perf_counter() - request_started) * 1000
+        print(
+            f"[PERF] /recognize total_ms={total_ms:.1f} decode_ms={decode_ms:.1f} "
+            f"face_model_ms={model_ms:.1f} employee_lookup_ms={employee_lookup_ms:.1f} "
+            f"proof_save_ms={proof_save_ms:.1f} faces={len(results)}"
+        )
+        return {"faces": results}
+    
+    except Exception as exc:
+        import traceback
+        print(f"[ERROR] /recognize {type(exc).__name__}: {exc}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        raise
 
 class Access(BaseModel):
     name: str
