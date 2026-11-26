@@ -1118,9 +1118,7 @@ def home():
 @app.get("/admin/status")
 def admin_status(request: Request):
     configured = admin_record() is not None
-    token = request.cookies.get(SESSION_COOKIE, "")
-    with admin_lock:
-        authenticated = bool(ADMIN_SESSIONS.get(token, 0) > time.time())
+    authenticated = _is_admin_authenticated(request)
     return {"pin_configured": configured, "authenticated": authenticated}
 
 
@@ -1281,8 +1279,11 @@ def employee_login(data: EmployeeLoginPayload, request: Request, response: Respo
     EMPLOYEE_LOGIN_LOCKOUTS.pop(client, None)
     admin_token = request.cookies.get(SESSION_COOKIE, "")
     if admin_token:
-        with admin_lock:
-            ADMIN_SESSIONS.pop(admin_token, None)
+        if os.environ.get("DATABASE_URL"):
+            _revoke_db_session("admin", admin_token)
+        else:
+            with admin_lock:
+                ADMIN_SESSIONS.pop(admin_token, None)
         response.delete_cookie(
             SESSION_COOKIE, path="/", httponly=True, samesite="strict"
         )
