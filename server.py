@@ -189,6 +189,44 @@ def recognition_proof_expired(proof, now):
     return proof[2] < now
 
 
+def issue_recognition_proof(name, score, recognized_at):
+    token = secrets.token_urlsafe(24)
+    proof = (name, round(score, 3), time.time() + 10, recognized_at)
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.save_recognition_proof(token, {
+            "name": proof[0], "score": proof[1],
+            "expires": proof[2], "recognized_at": proof[3],
+        })
+    else:
+        RECOGNITION_PROOFS[token] = proof
+    return token
+
+
+def consume_recognition_proofs(tokens):
+    if os.environ.get("DATABASE_URL"):
+        stored = attendance_db.consume_recognition_proofs(tokens)
+        return [stored.get(token) for token in tokens]
+    now = time.time()
+    for token, proof in list(RECOGNITION_PROOFS.items()):
+        if recognition_proof_expired(proof, now):
+            RECOGNITION_PROOFS.pop(token, None)
+    return [RECOGNITION_PROOFS.pop(token, None) for token in tokens]
+
+
+def access_cooldown_remaining(name, now=None):
+    now = time.time() if now is None else now
+    if os.environ.get("DATABASE_URL"):
+        latest = attendance_db.latest_face_access_event(name)
+        if latest:
+            try:
+                expires = datetime.fromisoformat(latest["time"]).timestamp() + ACCESS_COOLDOWN_SECONDS
+                return max(0.0, expires - now)
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+    return max(0.0, ACCESS_COOLDOWNS.get(name, 0) - now)
+
+
 def load_antispoof_model():
     global liveness_model
     liveness_model = load_liveness_model()
@@ -1757,17 +1795,15 @@ def recognize(file: UploadFile = File(...)):
     results = []
     with lock:
         now = time.time()
-        for token, proof in list(RECOGNITION_PROOFS.items()):
-            if recognition_proof_expired(proof, now):
-                RECOGNITION_PROOFS.pop(token, None)
-        for name, expires in list(ACCESS_COOLDOWNS.items()):
-            if expires <= now:
-                ACCESS_COOLDOWNS.pop(name, None)
+        if not os.environ.get("DATABASE_URL"):
+            for name, expires in list(ACCESS_COOLDOWNS.items()):
+                if expires <= now:
+                    ACCESS_COOLDOWNS.pop(name, None)
         for face in detect(img):
             name, score = identify(embed(img, face))
             recognized_at = time.time()
             reason = access_reason(name)
-            cooldown_remaining = max(0.0, ACCESS_COOLDOWNS.get(name, 0) - now)
+            cooldown_remaining = access_cooldown_remaining(name, now)
             x, y, w, h = [int(v) for v in face[:4]]
             result = {
                 "name": name,
@@ -1789,17 +1825,9 @@ def recognize(file: UploadFile = File(...)):
                 and employee["consent_at"]
             )
             if reason is None and cooldown_remaining == 0:
-                token = secrets.token_urlsafe(24)
-                RECOGNITION_PROOFS[token] = (
-                    name, round(score, 3), time.time() + 10, recognized_at,
-                )
-                result["proof"] = token
+                result["proof"] = issue_recognition_proof(name, score, recognized_at)
             elif name != "Unknown" and STAFF_META.get(name, default_meta()).get("active", True):
-                token = secrets.token_urlsafe(24)
-                RECOGNITION_PROOFS[token] = (
-                    name, round(score, 3), time.time() + 10, recognized_at,
-                )
-                result["proof"] = token
+                result["proof"] = issue_recognition_proof(name, score, recognized_at)
             results.append(result)
     return {"faces": results}
 
@@ -1814,10 +1842,7 @@ class Access(BaseModel):
 def access(data: Access):
     with lock:
         now = time.time()
-        for token, proof in list(RECOGNITION_PROOFS.items()):
-            if recognition_proof_expired(proof, now):
-                RECOGNITION_PROOFS.pop(token, None)
-        evidence = [RECOGNITION_PROOFS.pop(token, None) for token in data.proofs]
+        evidence = consume_recognition_proofs(data.proofs)
         valid_evidence = (
             all(item is not None for item in evidence)
             and len(set(data.proofs)) == 3
@@ -1828,13 +1853,14 @@ def access(data: Access):
             raise HTTPException(status_code=403, detail="Access denied: fresh face recognition is required.")
         reason = access_reason(data.name)
         if reason is None:
-            cooldown_remaining = ACCESS_COOLDOWNS.get(data.name, 0) - now
+            cooldown_remaining = access_cooldown_remaining(data.name, now)
             if cooldown_remaining > 0:
                 raise HTTPException(
                     status_code=429,
                     detail=f"Please wait {math.ceil(cooldown_remaining)} seconds before granting access to {data.name} again.",
                 )
-            ACCESS_COOLDOWNS[data.name] = now + ACCESS_COOLDOWN_SECONDS
+            if not os.environ.get("DATABASE_URL"):
+                ACCESS_COOLDOWNS[data.name] = now + ACCESS_COOLDOWN_SECONDS
     if reason:
         append_entry("entry", "denied", data.name, data.score, "face", reason)
         raise HTTPException(status_code=403, detail=f"Access denied: {reason}.")
@@ -2545,10 +2571,7 @@ def attendance_clock(data: AttendanceClock):
         )
     with lock:
         now = time.time()
-        for token, proof in list(RECOGNITION_PROOFS.items()):
-            if recognition_proof_expired(proof, now):
-                RECOGNITION_PROOFS.pop(token, None)
-        evidence = [RECOGNITION_PROOFS.pop(token, None) for token in data.proofs]
+        evidence = consume_recognition_proofs(data.proofs)
         valid_evidence = (
             all(item is not None for item in evidence)
             and len(set(data.proofs)) == 3
