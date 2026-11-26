@@ -1,5 +1,6 @@
 """PostgreSQL persistence for employee profiles and attendance (Supabase)."""
 import csv
+import time
 import hashlib
 import json
 import math
