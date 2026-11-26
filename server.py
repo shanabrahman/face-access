@@ -2651,6 +2651,7 @@ def attendance_spoken_message(employee, action):
 @app.post("/attendance/clock")
 def attendance_clock(data: AttendanceClock):
     request_started = time.perf_counter()
+    proof_started = time.perf_counter()
     if not data.photo_data:
         raise HTTPException(
             status_code=400,
