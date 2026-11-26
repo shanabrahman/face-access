@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time as datetime_time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -265,11 +266,18 @@ def _staff_storage_prefix(name):
 
 def _load_staff_from_storage():
     db = {}
-    folders = face_storage.list_objects(face_storage.BUCKET_EMPLOYEE_FACES)
-    for folder in sorted(item.get("name", "") for item in folders if item.get("name")):
-        samples = []
+    folders = sorted(
+        item.get("name", "") for item in
+        face_storage.list_objects(face_storage.BUCKET_EMPLOYEE_FACES)
+        if item.get("name")
+    )
+
+    def download_folder(folder):
         prefix = _staff_storage_prefix(folder)
-        objects = face_storage.list_objects(face_storage.BUCKET_EMPLOYEE_FACES, prefix)
+        objects = face_storage.list_objects(
+            face_storage.BUCKET_EMPLOYEE_FACES, prefix
+        )
+        downloads = []
         for item in sorted(objects, key=lambda entry: entry.get("name", "")):
             filename = item.get("name", "")
             ext = os.path.splitext(filename)[1].lower()
@@ -279,6 +287,20 @@ def _load_staff_from_storage():
             content = face_storage.download_bytes(
                 face_storage.BUCKET_EMPLOYEE_FACES, object_path
             )
+            downloads.append((filename, ext, content))
+        return prefix, downloads
+
+    # Storage calls are network-bound; fetch employee folders concurrently.
+    # Face detection/embedding remains sequential because OpenCV models are shared.
+    if folders:
+        with ThreadPoolExecutor(max_workers=min(8, len(folders))) as executor:
+            downloaded_folders = list(executor.map(download_folder, folders))
+    else:
+        downloaded_folders = []
+
+    for prefix, downloads in downloaded_folders:
+        samples = []
+        for filename, ext, content in downloads:
             if ext in IMG_EXT:
                 img = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
                 if img is not None:
@@ -313,7 +335,6 @@ def _load_staff_from_storage():
         else:
             print(f"WARNING: no face found for {prefix}")
     return db
-
 
 def load_staff():
     if _supabase_storage_enabled():
