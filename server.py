@@ -1717,11 +1717,7 @@ def hod_employee_attendance(employee_id: str, month: str, request: Request):
 def hod_employee_profile_photo(employee_id: str, request: Request):
     hod = ensure_hod(request)
     employee = _ensure_hod_employee(hod, employee_id)
-    path = safe_profile_photo_path(employee)
-    if path is None:
-        raise HTTPException(status_code=404, detail="Profile photo is unavailable.")
-    return FileResponse(path, media_type="image/jpeg", content_disposition_type="inline",
-                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+    return profile_photo_response(employee)
 
 
 @app.get("/hod/attendance/{attendance_id}/photo/{action}")
@@ -2290,6 +2286,34 @@ def safe_profile_photo_path(employee):
     return path
 
 
+def profile_photo_response(employee):
+    if _supabase_storage_enabled():
+        object_path = employee.get("profile_photo") or ""
+        try:
+            content = face_storage.download_bytes(
+                face_storage.BUCKET_EMPLOYEE_FACES, object_path
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Profile photo is unavailable.") from exc
+        return Response(
+            content=content, media_type="image/jpeg",
+            headers={
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    path = safe_profile_photo_path(employee)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Profile photo is unavailable.")
+    return FileResponse(
+        path, media_type="image/jpeg", content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @app.get("/employees/{employee_id}/profile-photo")
 def hr_employee_profile_photo(employee_id: str, request: Request):
     ensure_admin(request)
@@ -2312,18 +2336,7 @@ def hr_employee_profile_photo(employee_id: str, request: Request):
                 "X-Content-Type-Options": "nosniff",
             },
         )
-    path = safe_profile_photo_path(employee)
-    if path is None:
-        raise HTTPException(status_code=404, detail="Profile photo is unavailable.")
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        content_disposition_type="inline",
-        headers={
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+    return profile_photo_response(employee)
 
 
 @app.get("/employee-accounts")
@@ -2882,18 +2895,7 @@ def employee_profile(request: Request):
 @app.get("/employee/profile-photo")
 def employee_profile_photo(request: Request):
     employee = ensure_employee(request)
-    path = safe_profile_photo_path(employee)
-    if path is None:
-        raise HTTPException(status_code=404, detail="Profile photo is unavailable.")
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        content_disposition_type="inline",
-        headers={
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+    return profile_photo_response(employee)
 
 
 @app.get("/employee/attendance")
