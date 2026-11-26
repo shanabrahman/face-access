@@ -1184,7 +1184,8 @@ async def prevent_employee_data_caching(request: Request, call_next):
 
 @app.get("/")
 def home():
-    return FileResponse("web/index.html")
+    index_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html")
+    return FileResponse(index_path)
 
 
 @app.get("/admin/status")
