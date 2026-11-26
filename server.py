@@ -409,6 +409,9 @@ def append_entry(event, status, name, score="", method="", details=""):
         "method": method,
         "details": details,
     }
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.log_access_event(row)
+        return
     with log_lock:
         if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE):
             with open(LOG_FILE, newline="", encoding="utf-8") as file:
@@ -784,10 +787,13 @@ def set_login_failure(client):
 
 
 def query_entries(name="", start_date="", end_date="", status="", event=""):
-    if not os.path.exists(LOG_FILE):
-        return []
-    with open(LOG_FILE, newline="", encoding="utf-8") as file:
-        entries = list(csv.DictReader(file))
+    if os.environ.get("DATABASE_URL"):
+        entries = list(reversed(attendance_db.access_event_list()))
+    else:
+        if not os.path.exists(LOG_FILE):
+            return []
+        with open(LOG_FILE, newline="", encoding="utf-8") as file:
+            entries = list(csv.DictReader(file))
     results = []
     for entry in entries:
         timestamp = entry.get("time", "")
@@ -822,10 +828,14 @@ def query_entries(name="", start_date="", end_date="", status="", event=""):
 def load_recent_access_cooldowns(now=None):
     now = time.time() if now is None else now
     cooldowns = {}
-    if not os.path.exists(LOG_FILE):
-        return cooldowns
-    with open(LOG_FILE, newline="", encoding="utf-8") as file:
-        for entry in csv.DictReader(file):
+    if os.environ.get("DATABASE_URL"):
+        entries = reversed(attendance_db.access_event_list())
+    else:
+        if not os.path.exists(LOG_FILE):
+            return cooldowns
+        with open(LOG_FILE, newline="", encoding="utf-8") as file:
+            entries = list(csv.DictReader(file))
+    for entry in entries:
             if (
                 entry.get("event") != "entry"
                 or entry.get("status") != "granted"
@@ -1068,10 +1078,11 @@ with lock:
     STAFF = load_staff()
 for staff_name in STAFF:
     STAFF_META.setdefault(staff_name, default_meta())
-ACCESS_COOLDOWNS.update(load_recent_access_cooldowns())
 attendance_db.initialize_database()
 attendance_db.sync_legacy_staff(STAFF, STAFF_META)
-attendance_db.import_legacy_entries(LOG_FILE)
+if not os.environ.get("DATABASE_URL"):
+    attendance_db.import_legacy_entries(LOG_FILE)
+ACCESS_COOLDOWNS.update(load_recent_access_cooldowns())
 if not os.environ.get("DATABASE_URL"):
     os.makedirs(ATTENDANCE_PHOTO_DIR, mode=0o700, exist_ok=True)
     if os.name == "posix":
