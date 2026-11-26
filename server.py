@@ -339,12 +339,19 @@ def default_meta():
 
 
 def load_meta():
-    if not os.path.exists(SETTINGS_FILE):
-        return {}
-    with open(SETTINGS_FILE, encoding="utf-8") as file:
-        data = json.load(file)
+    if os.environ.get("DATABASE_URL"):
+        raw = attendance_db.settings().get("staff_meta", "{}")
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Stored staff settings must contain valid JSON.") from exc
+    else:
+        if not os.path.exists(SETTINGS_FILE):
+            return {}
+        with open(SETTINGS_FILE, encoding="utf-8") as file:
+            data = json.load(file)
     if not isinstance(data, dict):
-        raise ValueError(f"{SETTINGS_FILE} must contain a JSON object")
+        raise ValueError("Staff settings must contain a JSON object.")
     result = {}
     for name, settings in data.items():
         if not valid_name(name) or not isinstance(settings, dict):
@@ -360,6 +367,11 @@ def load_meta():
 
 
 def save_meta():
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.update_settings({
+            "staff_meta": json.dumps(STAFF_META, separators=(",", ":"))
+        })
+        return
     fd, temp_path = tempfile.mkstemp(prefix=".settings-", dir=".")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
@@ -442,18 +454,35 @@ def ensure_admin(request):
 
 
 def admin_record():
-    if not os.path.exists(ADMIN_FILE):
-        return None
-    with open(ADMIN_FILE, encoding="utf-8") as file:
-        data = json.load(file)
+    if os.environ.get("DATABASE_URL"):
+        raw = attendance_db.settings().get("admin_pin_record", "")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Stored admin PIN data is invalid.") from exc
+    else:
+        if not os.path.exists(ADMIN_FILE):
+            return None
+        with open(ADMIN_FILE, encoding="utf-8") as file:
+            data = json.load(file)
     if not isinstance(data, dict) or not isinstance(data.get("salt"), str) or not isinstance(data.get("hash"), str):
-        raise ValueError(f"{ADMIN_FILE} contains invalid admin PIN data")
+        raise ValueError("Admin PIN data is invalid.")
     return data
 
 
 def set_admin_pin(pin):
     salt = secrets.token_bytes(16)
     pin_hash = hashlib.pbkdf2_hmac("sha256", pin.encode("utf-8"), salt, PBKDF2_ITERATIONS)
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.update_settings({
+            "admin_pin_record": json.dumps({
+                "salt": salt.hex(),
+                "hash": pin_hash.hex(),
+            }, separators=(",", ":"))
+        })
+        return
     fd, temp_path = tempfile.mkstemp(prefix=".admin-", dir=".")
     try:
         os.fchmod(fd, 0o600)
@@ -997,7 +1026,7 @@ class HODAccountUpdate(BaseModel):
 def admin_setup(data: PinPayload, request: Request, response: Response):
     check_login_rate(request)
     with admin_lock:
-        if os.path.exists(ADMIN_FILE):
+        if admin_record() is not None:
             raise HTTPException(status_code=409, detail="Admin PIN is already configured. Please log in.")
         set_admin_pin(data.pin)
     LOGIN_FAILURES.pop(request.client.host if request.client else "unknown", None)
