@@ -485,6 +485,22 @@ def _revoke_db_sessions_for(role, field, value):
         attendance_db.update_settings(updates)
 
 
+def _revoke_all_db_sessions(role):
+    updates = {}
+    for key, raw in attendance_db.settings().items():
+        if not key.startswith(f"session_{role}_"):
+            continue
+        try:
+            session = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(session, dict) and not session.get("revoked"):
+            session["revoked"] = True
+            updates[key] = json.dumps(session, separators=(",", ":"))
+    if updates:
+        attendance_db.update_settings(updates)
+
+
 def _is_admin_authenticated(request):
     token = request.cookies.get(SESSION_COOKIE, "")
     if os.environ.get("DATABASE_URL"):
@@ -1192,7 +1208,10 @@ def admin_change_pin(data: ChangePinPayload, request: Request, response: Respons
         raise HTTPException(status_code=401, detail="Current PIN is incorrect.")
     with admin_lock:
         set_admin_pin(data.new_pin)
-        ADMIN_SESSIONS.clear()
+        if os.environ.get("DATABASE_URL"):
+            _revoke_all_db_sessions("admin")
+        else:
+            ADMIN_SESSIONS.clear()
     LOGIN_FAILURES.pop(client, None)
     LOGIN_LOCKOUTS.pop(client, None)
     clear_employee_session(request, response)
