@@ -386,6 +386,19 @@ def access_event_list(limit=10000, database_path=DATABASE_FILE):
         return [dict(row) for row in rows]
 
 
+def latest_face_access_event(name, database_path=DATABASE_FILE):
+    with connection(database_path) as db:
+        row = db.execute(
+            """SELECT time, event, status, name, score, method, details
+               FROM access_events
+               WHERE name = ? AND event = 'entry'
+                 AND status = 'granted' AND method = 'face'
+               ORDER BY event_id DESC LIMIT 1""",
+            (name,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def settings(database_path=DATABASE_FILE):
     with connection(database_path) as db:
         values = dict(DEFAULT_SETTINGS)
