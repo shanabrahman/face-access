@@ -1185,14 +1185,22 @@ print(f"Ready: {len(STAFF)} staff loaded. Open http://localhost:8000")
 
 
 def say(text):
-    if sys.platform == "darwin":
-        subprocess.Popen(["say", text])
-    else:
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", SPEAK_PS],
-            env={**os.environ, "FACE_SAY": text},
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+    # Speech is a local desktop convenience; Vercel/serverless runtimes
+    # do not provide macOS "say" or Windows PowerShell.
+    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+        return
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["say", text])
+        elif sys.platform == "win32":
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", SPEAK_PS],
+                env={**os.environ, "FACE_SAY": text},
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+    except OSError as exc:
+        # Never let optional audio break a completed attendance transaction.
+        print(f"Attendance voice notification unavailable: {exc}")
 
 
 # ---------- API ----------
