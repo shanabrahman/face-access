@@ -530,23 +530,33 @@ def save_recognition_proof(token, proof, database_path=DATABASE_FILE):
 
 def consume_recognition_proofs(tokens, database_path=DATABASE_FILE):
     results = {}
+    # Consume all frame proofs in one database round trip. The tokens are
+    # still single-use: DELETE ... RETURNING removes them atomically.
+    token_by_key = {
+        "recognition_proof_" + hashlib.sha256(token.encode("utf-8")).hexdigest(): token
+        for token in tokens
+    }
+    if not token_by_key:
+        return results
+    placeholders = ", ".join("?" for _ in token_by_key)
     with connection(database_path) as db:
-        for token in tokens:
-            key = "recognition_proof_" + hashlib.sha256(token.encode("utf-8")).hexdigest()
-            row = db.execute(
-                "DELETE FROM app_settings WHERE setting_key = ? RETURNING setting_value",
-                (key,),
-            ).fetchone()
-            if row:
-                try:
-                    proof = json.loads(row["setting_value"])
-                    if float(proof.get("expires", 0)) >= time.time():
-                        results[token] = (
-                            proof["name"], float(proof["score"]),
-                            float(proof["expires"]), float(proof["recognized_at"]),
-                        )
-                except (TypeError, ValueError, KeyError, json.JSONDecodeError, AttributeError):
-                    continue
+        rows = db.execute(
+            f"DELETE FROM app_settings WHERE setting_key IN ({placeholders}) "
+            "RETURNING setting_key, setting_value",
+            tuple(token_by_key),
+        ).fetchall()
+        now = time.time()
+        for row in rows:
+            token = token_by_key[row["setting_key"]]
+            try:
+                proof = json.loads(row["setting_value"])
+                if float(proof.get("expires", 0)) >= now:
+                    results[token] = (
+                        proof["name"], float(proof["score"]),
+                        float(proof["expires"]), float(proof["recognized_at"]),
+                    )
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError, AttributeError):
+                continue
     return results
 
 
