@@ -4221,7 +4221,7 @@ async function decide(faces, frameBlob) {
       && !attendanceCompleted.has(`${attendanceAction}:${name}`)
     ) {
       tracker.attempted = true;
-      ready.push({ name, tracker });
+      ready.push({ name, tracker, proofs: tracker.proofs.slice(), photoBlob: frameBlob });
     }
   }
 
@@ -4232,9 +4232,9 @@ async function decide(faces, frameBlob) {
       `Recording ${actionLabel} for ${ready.map(item => item.name).join(', ')}...`,
       'granted'
     );
-    Promise.all(ready.map(async ({ name, tracker }) => {
+    Promise.all(ready.map(async ({ name, tracker, proofs, photoBlob }) => {
       try {
-        if (tracker.photoBlob.size > MAX_ATTENDANCE_PHOTO_BYTES) {
+        if (photoBlob.size > MAX_ATTENDANCE_PHOTO_BYTES) {
           throw new Error(
             'The live camera photo is too large to save. Move closer to the camera and try again.'
           );
@@ -4245,8 +4245,8 @@ async function decide(faces, frameBlob) {
           body: JSON.stringify({
             name,
             action,
-            proofs: tracker.proofs,
-            photo_data: await blobToBase64(tracker.photoBlob)
+            proofs,
+            photo_data: await blobToBase64(photoBlob)
           })
         });
         const result = await response.json();
@@ -4265,6 +4265,7 @@ async function decide(faces, frameBlob) {
         tracker.count = 0;
         tracker.proofs = [];
         tracker.photoBlob = null;
+        tracker.attempted = /fresh face recognition|confirmed across fresh camera frames/i.test(error.message);
         return { name, ...tracker.result };
       }
     })).then(results => {
