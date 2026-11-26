@@ -699,13 +699,18 @@ def ensure_employee(request):
 
 def check_employee_login_rate(request):
     client = request.client.host if request.client else "unknown"
-    now = time.time()
-    if EMPLOYEE_LOGIN_LOCKOUTS.get(client, 0) > now:
+    locked = (attendance_db.login_is_locked("employee", client)
+              if os.environ.get("DATABASE_URL")
+              else EMPLOYEE_LOGIN_LOCKOUTS.get(client, 0) > time.time())
+    if locked:
         raise HTTPException(status_code=429, detail="Too many incorrect login attempts. Try again later.")
     return client
 
 
 def set_employee_login_failure(client):
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.record_login_failure("employee", client)
+        return
     failures = EMPLOYEE_LOGIN_FAILURES.get(client, 0) + 1
     EMPLOYEE_LOGIN_FAILURES[client] = failures
     if failures >= 5:
@@ -735,13 +740,18 @@ def employee_password_matches(password, salt_hex, expected_hex):
 
 def check_hod_login_rate(request):
     client = request.client.host if request.client else "unknown"
-    now = time.time()
-    if HOD_LOGIN_LOCKOUTS.get(client, 0) > now:
+    locked = (attendance_db.login_is_locked("hod", client)
+              if os.environ.get("DATABASE_URL")
+              else HOD_LOGIN_LOCKOUTS.get(client, 0) > time.time())
+    if locked:
         raise HTTPException(status_code=429, detail="Too many incorrect login attempts. Try again later.")
     return client
 
 
 def set_hod_login_failure(client):
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.record_login_failure("hod", client)
+        return
     failures = HOD_LOGIN_FAILURES.get(client, 0) + 1
     HOD_LOGIN_FAILURES[client] = failures
     if failures >= 5:
@@ -810,18 +820,31 @@ def ensure_hod(request):
 
 def check_login_rate(request):
     client = request.client.host if request.client else "unknown"
-    now = time.time()
-    if LOGIN_LOCKOUTS.get(client, 0) > now:
+    locked = (attendance_db.login_is_locked("admin", client)
+              if os.environ.get("DATABASE_URL")
+              else LOGIN_LOCKOUTS.get(client, 0) > time.time())
+    if locked:
         raise HTTPException(status_code=429, detail="Too many incorrect PIN attempts. Try again later.")
     return client
 
 
 def set_login_failure(client):
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.record_login_failure("admin", client)
+        return
     failures = LOGIN_FAILURES.get(client, 0) + 1
     LOGIN_FAILURES[client] = failures
     if failures >= 5:
         LOGIN_LOCKOUTS[client] = time.time() + 60
         LOGIN_FAILURES[client] = 0
+
+
+def clear_login_failures(scope, client, failures, lockouts):
+    if os.environ.get("DATABASE_URL"):
+        attendance_db.clear_login_failures(scope, client)
+    else:
+        failures.pop(client, None)
+        lockouts.pop(client, None)
 
 
 def query_entries(name="", start_date="", end_date="", status="", event=""):
@@ -1224,12 +1247,12 @@ class HODAccountUpdate(BaseModel):
 
 @app.post("/admin/setup")
 def admin_setup(data: PinPayload, request: Request, response: Response):
-    check_login_rate(request)
+    client = check_login_rate(request)
     with admin_lock:
         if admin_record() is not None:
             raise HTTPException(status_code=409, detail="Admin PIN is already configured. Please log in.")
         set_admin_pin(data.pin)
-    LOGIN_FAILURES.pop(request.client.host if request.client else "unknown", None)
+    clear_login_failures("admin", client, LOGIN_FAILURES, LOGIN_LOCKOUTS)
     clear_employee_session(request, response)
     set_session(response, secure=request.url.scheme == "https")
     return {"ok": True}
@@ -1259,8 +1282,7 @@ def admin_change_pin(data: ChangePinPayload, request: Request, response: Respons
             _revoke_all_db_sessions("admin")
         else:
             ADMIN_SESSIONS.clear()
-    LOGIN_FAILURES.pop(client, None)
-    LOGIN_LOCKOUTS.pop(client, None)
+    clear_login_failures("admin", client, LOGIN_FAILURES, LOGIN_LOCKOUTS)
     clear_employee_session(request, response)
     set_session(response, secure=request.url.scheme == "https")
     return {"ok": True}
@@ -1281,8 +1303,7 @@ def admin_login(data: PinPayload, request: Request, response: Response):
     if not hmac.compare_digest(actual, expected):
         set_login_failure(client)
         raise HTTPException(status_code=401, detail="Incorrect PIN.")
-    LOGIN_FAILURES.pop(client, None)
-    LOGIN_LOCKOUTS.pop(client, None)
+    clear_login_failures("admin", client, LOGIN_FAILURES, LOGIN_LOCKOUTS)
     clear_employee_session(request, response)
     set_session(response, secure=request.url.scheme == "https")
     return {"ok": True}
@@ -1324,8 +1345,7 @@ def employee_login(data: EmployeeLoginPayload, request: Request, response: Respo
     ):
         set_employee_login_failure(client)
         raise HTTPException(status_code=401, detail="Employee ID/email or password is incorrect.")
-    EMPLOYEE_LOGIN_FAILURES.pop(client, None)
-    EMPLOYEE_LOGIN_LOCKOUTS.pop(client, None)
+    clear_login_failures("employee", client, EMPLOYEE_LOGIN_FAILURES, EMPLOYEE_LOGIN_LOCKOUTS)
     admin_token = request.cookies.get(SESSION_COOKIE, "")
     if admin_token:
         if os.environ.get("DATABASE_URL"):
@@ -1369,8 +1389,7 @@ def hod_login(data: HODLoginPayload, request: Request, response: Response):
     if account is None or not valid or not account["is_active"]:
         set_hod_login_failure(client)
         raise HTTPException(status_code=401, detail="HOD ID/email or password is incorrect.")
-    HOD_LOGIN_FAILURES.pop(client, None)
-    HOD_LOGIN_LOCKOUTS.pop(client, None)
+    clear_login_failures("hod", client, HOD_LOGIN_FAILURES, HOD_LOGIN_LOCKOUTS)
     attendance_db.update_hod_last_login(account["hod_id"])
     set_hod_session(account["hod_id"], response, secure=request.url.scheme == "https")
     return {"ok": True, "department": account["department"]}
