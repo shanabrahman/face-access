@@ -611,6 +611,17 @@ def log_access_event(entry, database_path=DATABASE_FILE):
         )
 
 
+def access_event_list(limit=10000, database_path=DATABASE_FILE):
+    limit = max(1, min(int(limit), 100000))
+    with connection(database_path) as db:
+        rows = db.execute(
+            """SELECT time, event, status, name, score, method, details
+               FROM access_events ORDER BY event_id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def settings(database_path=DATABASE_FILE):
     with connection(database_path) as db:
         values = dict(DEFAULT_SETTINGS)
