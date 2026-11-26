@@ -191,7 +191,7 @@ def recognition_proof_expired(proof, now):
 
 def issue_recognition_proof(name, score, recognized_at):
     token = secrets.token_urlsafe(24)
-    proof = (name, round(score, 3), time.time() + 10, recognized_at)
+    proof = (name, round(score, 3), time.time() + 30, recognized_at)
     if os.environ.get("DATABASE_URL"):
         attendance_db.save_recognition_proof(token, {
             "name": proof[0], "score": proof[1],
