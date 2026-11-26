@@ -1159,7 +1159,7 @@
 
 <script>
 const CONFIRM_FRAMES = 3;     // consecutive live matches required for attendance
-const INTERVAL_MS = 400;      // how often a snapshot is sent
+const RECOGNITION_RETRY_MS = 50; // start the next frame as soon as the previous request finishes
 const MAX_CAMERA_FRAME_WIDTH = 1280;
 const MAX_CAMERA_FRAME_HEIGHT = 960;
 const MAX_ATTENDANCE_PHOTO_BYTES = 5 * 1024 * 1024;
@@ -4036,7 +4036,7 @@ async function startCamera() {
     cameraToggle.setAttribute('aria-pressed', 'true');
     updateCameraState(true);
     setStatus('Look at the camera');
-    recognitionTimer = setInterval(tick, INTERVAL_MS);
+    recognitionTimer = setTimeout(tick, 0);
   } catch (e) {
     video.srcObject?.getTracks().forEach(track => track.stop());
     video.srcObject = null;
@@ -4051,7 +4051,7 @@ async function startCamera() {
 }
 
 function stopCamera() {
-  clearInterval(recognitionTimer);
+  clearTimeout(recognitionTimer);
   recognitionTimer = null;
   cameraGeneration++;
   cameraStream?.getTracks().forEach(track => track.stop());
@@ -4122,6 +4122,9 @@ async function tick() {
     }
   } finally {
     busy = false;
+    if (generation === cameraGeneration && cameraStream) {
+      recognitionTimer = setTimeout(tick, RECOGNITION_RETRY_MS);
+    }
   }
 }
 
@@ -4294,9 +4297,12 @@ async function decide(faces, frameBlob) {
       ];
       setStatus(messages.join(' '), attendanceStatusTone(results));
       if (successes.length > 0) {
-        speakAttendanceAnnouncement(successes.map(result => result.message));
+        speakAttendanceAnnouncement(successes.map(result =>
+          action === 'check_in'
+            ? `Welcome ${result.name}, check-in successful.`
+            : `Goodbye ${result.name}, check-out successful.`
+        ));
       }
-      window.alert(messages.join('\n'));
       if (successes.length > 0) {
         loadDashboard();
         loadAttendance();
