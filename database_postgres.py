@@ -7,6 +7,7 @@ import math
 import os
 import re
 import psycopg
+from psycopg_pool import ConnectionPool
 from contextlib import contextmanager
 from datetime import date, datetime, time as datetime_time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -233,27 +234,50 @@ class _PostgresConnection:
         return result
 
 
-@contextmanager
-def connection(database_path=DATABASE_FILE):
-    """Open a short-lived Supabase PostgreSQL connection."""
+_connection_pool = None
+_connection_pool_lock = __import__("threading").Lock()
+
+
+def _get_connection_pool():
+    """Reuse a small per-instance pool instead of opening TCP/TLS per query."""
+    global _connection_pool
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         raise RuntimeError("DATABASE_URL is required for the PostgreSQL database backend.")
-    raw = psycopg.connect(
-        dsn,
-        sslmode=os.environ.get("PGSSLMODE", "require"),
-        prepare_threshold=None,
-        row_factory=_hybrid_row,
-    )
-    db = _PostgresConnection(raw)
-    try:
-        yield db
-        raw.commit()
-    except Exception:
-        raw.rollback()
-        raise
-    finally:
-        raw.close()
+    if _connection_pool is None:
+        with _connection_pool_lock:
+            if _connection_pool is None:
+                pool = ConnectionPool(
+                    conninfo=dsn,
+                    min_size=0,
+                    max_size=2,
+                    timeout=8,
+                    max_idle=60,
+                    max_lifetime=300,
+                    kwargs={
+                        "sslmode": os.environ.get("PGSSLMODE", "require"),
+                        "prepare_threshold": None,
+                        "row_factory": _hybrid_row,
+                    },
+                    open=False,
+                )
+                pool.open(wait=False)
+                _connection_pool = pool
+    return _connection_pool
+
+
+@contextmanager
+def connection(database_path=DATABASE_FILE):
+    """Borrow a reusable Supabase PostgreSQL connection from the local pool."""
+    pool = _get_connection_pool()
+    with pool.connection() as raw:
+        db = _PostgresConnection(raw)
+        try:
+            yield db
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
 
 
 def initialize_database(database_path=DATABASE_FILE):
