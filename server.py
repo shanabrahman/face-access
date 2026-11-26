@@ -79,6 +79,7 @@ SPEAK_PS = ("Add-Type -AssemblyName System.Speech; "
 detector = cv2.FaceDetectorYN.create(DET_MODEL, "", (320, 320), 0.7, 0.3, 5000)
 recognizer = cv2.FaceRecognizerSF.create(REC_MODEL, "")
 liveness_model = None
+liveness_model_lock = threading.Lock()
 lock = threading.Lock()
 log_lock = threading.Lock()
 admin_lock = threading.Lock()
@@ -134,6 +135,11 @@ def load_liveness_model():
 
 
 def assess_liveness(img, face):
+    global liveness_model
+    if liveness_model is None:
+        with liveness_model_lock:
+            if liveness_model is None:
+                load_antispoof_model()
     if liveness_model is None:
         raise LivenessUnavailableError("The anti-spoof model is not available.")
 
@@ -234,7 +240,6 @@ def load_antispoof_model():
         print("Loaded local face anti-spoof model.")
 
 
-load_antispoof_model()
 
 
 def largest_face_embedding(img):
