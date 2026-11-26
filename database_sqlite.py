@@ -1,5 +1,6 @@
 """SQLite persistence for employee profiles and attendance."""
 import csv
+import time
 import hashlib
 import json
 import math
