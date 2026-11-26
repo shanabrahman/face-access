@@ -641,6 +641,53 @@ def update_settings(values, database_path=DATABASE_FILE):
         )
 
 
+def save_recognition_proof(token, proof, database_path=DATABASE_FILE):
+    key = "recognition_proof_" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+    value = json.dumps(proof, separators=(",", ":"))
+    with connection(database_path) as db:
+        rows = db.execute(
+            "SELECT setting_key, setting_value FROM app_settings WHERE setting_key LIKE 'recognition_proof_%'"
+        ).fetchall()
+        expired = []
+        now = time.time()
+        for row in rows:
+            try:
+                stored = json.loads(row["setting_value"])
+                if float(stored.get("expires", 0)) < now:
+                    expired.append(row["setting_key"])
+            except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+                expired.append(row["setting_key"])
+        for expired_key in expired:
+            db.execute("DELETE FROM app_settings WHERE setting_key = ?", (expired_key,))
+        db.execute(
+            "INSERT INTO app_settings(setting_key, setting_value) VALUES (?, ?) "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
+            (key, value),
+        )
+
+
+def consume_recognition_proofs(tokens, database_path=DATABASE_FILE):
+    results = {}
+    with connection(database_path) as db:
+        for token in tokens:
+            key = "recognition_proof_" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+            row = db.execute(
+                "DELETE FROM app_settings WHERE setting_key = ? RETURNING setting_value",
+                (key,),
+            ).fetchone()
+            if row:
+                try:
+                    proof = json.loads(row["setting_value"])
+                    if float(proof.get("expires", 0)) >= time.time():
+                        results[token] = (
+                            proof["name"], float(proof["score"]),
+                            float(proof["expires"]), float(proof["recognized_at"]),
+                        )
+                except (TypeError, ValueError, KeyError, json.JSONDecodeError, AttributeError):
+                    continue
+    return results
+
+
 def employees(active_only=False, database_path=DATABASE_FILE):
     query = "SELECT * FROM employees"
     if active_only:
