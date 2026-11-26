@@ -472,24 +472,31 @@ def clear_login_failures(scope, client, database_path=DATABASE_FILE):
         db.execute("DELETE FROM app_settings WHERE setting_key = ?", (key,))
 
 
+_last_recognition_proof_cleanup = 0.0
+
+
 def save_recognition_proof(token, proof, database_path=DATABASE_FILE):
+    global _last_recognition_proof_cleanup
     key = "recognition_proof_" + hashlib.sha256(token.encode("utf-8")).hexdigest()
     value = json.dumps(proof, separators=(",", ":"))
     with connection(database_path) as db:
-        rows = db.execute(
-            "SELECT setting_key, setting_value FROM app_settings WHERE setting_key LIKE 'recognition_proof_%'"
-        ).fetchall()
-        expired = []
-        now = time.time()
-        for row in rows:
-            try:
-                stored = json.loads(row["setting_value"])
-                if float(stored.get("expires", 0)) < now:
+        now = time.monotonic()
+        if now - _last_recognition_proof_cleanup >= 60:
+            rows = db.execute(
+                "SELECT setting_key, setting_value FROM app_settings WHERE setting_key LIKE 'recognition_proof_%'"
+            ).fetchall()
+            expired = []
+            wall_clock = time.time()
+            for row in rows:
+                try:
+                    stored = json.loads(row["setting_value"])
+                    if float(stored.get("expires", 0)) < wall_clock:
+                        expired.append(row["setting_key"])
+                except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
                     expired.append(row["setting_key"])
-            except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
-                expired.append(row["setting_key"])
-        for expired_key in expired:
-            db.execute("DELETE FROM app_settings WHERE setting_key = ?", (expired_key,))
+            for expired_key in expired:
+                db.execute("DELETE FROM app_settings WHERE setting_key = ?", (expired_key,))
+            _last_recognition_proof_cleanup = now
         db.execute(
             "INSERT INTO app_settings(setting_key, setting_value) VALUES (?, ?) "
             "ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
