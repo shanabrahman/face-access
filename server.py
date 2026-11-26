@@ -1833,6 +1833,7 @@ def hod_report_export(request: Request, period: Literal["daily", "weekly", "mont
 
 @app.post("/recognize")
 def recognize(file: UploadFile = File(...)):
+    request_started = time.perf_counter()
     raw_data = file.file.read(MAX_IMAGE_BYTES + 1)
     if len(raw_data) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="Image must be 10 MB or smaller.")
@@ -1842,7 +1843,11 @@ def recognize(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Could not read the image.")
     if img.shape[0] * img.shape[1] > 40_000_000:
         raise HTTPException(status_code=413, detail="Image dimensions are too large.")
+    decode_ms = (time.perf_counter() - request_started) * 1000
     results = []
+    model_started = time.perf_counter()
+    employee_lookup_ms = 0.0
+    proof_save_ms = 0.0
     with lock:
         now = time.time()
         if not os.environ.get("DATABASE_URL"):
@@ -1867,7 +1872,9 @@ def recognize(file: UploadFile = File(...)):
                 "liveness_status": "photo_check_required",
                 "box": [x, y, w, h],
             }
+            employee_lookup_started = time.perf_counter()
             employee = attendance_db.employee_by_face_name(name) if name != "Unknown" else None
+            employee_lookup_ms += (time.perf_counter() - employee_lookup_started) * 1000
             result["employee_id"] = employee["employee_id"] if employee else ""
             result["attendance_allowed"] = bool(
                 employee
@@ -1875,10 +1882,21 @@ def recognize(file: UploadFile = File(...)):
                 and employee["consent_at"]
             )
             if reason is None and cooldown_remaining == 0:
+                proof_started = time.perf_counter()
                 result["proof"] = issue_recognition_proof(name, score, recognized_at)
+                proof_save_ms += (time.perf_counter() - proof_started) * 1000
             elif name != "Unknown" and STAFF_META.get(name, default_meta()).get("active", True):
+                proof_started = time.perf_counter()
                 result["proof"] = issue_recognition_proof(name, score, recognized_at)
+                proof_save_ms += (time.perf_counter() - proof_started) * 1000
             results.append(result)
+    model_ms = (time.perf_counter() - model_started) * 1000
+    total_ms = (time.perf_counter() - request_started) * 1000
+    print(
+        f"[PERF] /recognize total_ms={total_ms:.1f} decode_ms={decode_ms:.1f} "
+        f"face_model_ms={model_ms:.1f} employee_lookup_ms={employee_lookup_ms:.1f} "
+        f"proof_save_ms={proof_save_ms:.1f} faces={len(results)}"
+    )
     return {"faces": results}
 
 
@@ -1890,6 +1908,7 @@ class Access(BaseModel):
 
 @app.post("/access")
 def access(data: Access):
+    proof_started = time.perf_counter()
     with lock:
         now = time.time()
         evidence = consume_recognition_proofs(data.proofs)
@@ -2631,6 +2650,7 @@ def attendance_spoken_message(employee, action):
 
 @app.post("/attendance/clock")
 def attendance_clock(data: AttendanceClock):
+    request_started = time.perf_counter()
     if not data.photo_data:
         raise HTTPException(
             status_code=400,
@@ -2653,8 +2673,11 @@ def attendance_clock(data: AttendanceClock):
             )
         score = evidence[-1][1]
         recognized_at = evidence[-1][3]
+    proof_validation_ms = (time.perf_counter() - proof_started) * 1000
 
+    employee_lookup_started = time.perf_counter()
     employee = attendance_db.employee_by_face_name(data.name)
+    employee_lookup_ms = (time.perf_counter() - employee_lookup_started) * 1000
     if employee is None or employee["status"] != "active":
         raise HTTPException(status_code=403, detail="Employee is not active.")
     if not employee["consent_at"]:
@@ -2662,10 +2685,14 @@ def attendance_clock(data: AttendanceClock):
             status_code=403,
             detail="Recorded employee consent is required before face attendance.",
         )
+    photo_verification_started = time.perf_counter()
     photo_bytes, photo_score, liveness_score = decode_attendance_photo(
         data.photo_data, data.name
     )
+    photo_verification_ms = (time.perf_counter() - photo_verification_started) * 1000
+    settings_started = time.perf_counter()
     timezone_name = attendance_db.settings()["timezone"]
+    settings_ms = (time.perf_counter() - settings_started) * 1000
     captured_at = datetime.fromtimestamp(recognized_at, ZoneInfo(timezone_name))
     if data.action == "check_out":
         checkin_photo_path = attendance_db.open_attendance_photo_path(
@@ -2681,6 +2708,7 @@ def attendance_clock(data: AttendanceClock):
                             "attendance was not recorded."
                         ),
                     )
+    photo_upload_started = time.perf_counter()
     try:
         photo_path = save_attendance_photo(
             data.action, employee["employee_id"], captured_at, photo_bytes
@@ -2690,7 +2718,9 @@ def attendance_clock(data: AttendanceClock):
             status_code=503,
             detail="Attendance photo could not be saved; attendance was not recorded.",
         ) from exc
+    photo_upload_ms = (time.perf_counter() - photo_upload_started) * 1000
 
+    database_record_started = time.perf_counter()
     try:
         record = attendance_db.record_attendance(
             employee["employee_id"],
@@ -2735,10 +2765,20 @@ def attendance_clock(data: AttendanceClock):
             detail="Attendance could not be saved; its photo was not retained.",
         ) from exc
 
+    database_record_ms = (time.perf_counter() - database_record_started) * 1000
     status = "checked_in" if data.action == "check_in" else "checked_out"
     append_entry("attendance", status, data.name, score, "face")
     message, tone = attendance_message(employee, record, data.action)
     say(attendance_spoken_message(employee, data.action))
+    total_ms = (time.perf_counter() - request_started) * 1000
+    print(
+        f"[PERF] /attendance/clock total_ms={total_ms:.1f} "
+        f"proof_validation_ms={proof_validation_ms:.1f} "
+        f"employee_lookup_ms={employee_lookup_ms:.1f} "
+        f"photo_verification_ms={photo_verification_ms:.1f} "
+        f"photo_upload_ms={photo_upload_ms:.1f} "
+        f"database_record_ms={database_record_ms:.1f} settings_ms={settings_ms:.1f}"
+    )
     return {
         "ok": True,
         "message": message,
