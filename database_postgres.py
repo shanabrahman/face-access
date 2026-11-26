@@ -419,6 +419,58 @@ def update_settings(values, database_path=DATABASE_FILE):
         )
 
 
+def _login_throttle_key(scope, client):
+    digest = hashlib.sha256(str(client).encode("utf-8")).hexdigest()
+    return f"login_throttle_{scope}_{digest}"
+
+
+def login_is_locked(scope, client, database_path=DATABASE_FILE):
+    key = _login_throttle_key(scope, client)
+    with connection(database_path) as db:
+        row = db.execute(
+            "SELECT setting_value FROM app_settings WHERE setting_key = ?", (key,)
+        ).fetchone()
+        if not row:
+            return False
+        try:
+            state = json.loads(row["setting_value"])
+            return float(state.get("locked_until", 0)) > time.time()
+        except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+            return False
+
+
+def record_login_failure(scope, client, database_path=DATABASE_FILE):
+    key = _login_throttle_key(scope, client)
+    with connection(database_path) as db:
+        db.execute(
+            "INSERT INTO app_settings(setting_key, setting_value) VALUES (?, ?) "
+            "ON CONFLICT(setting_key) DO NOTHING",
+            (key, json.dumps({"failures": 0, "locked_until": 0})),
+        )
+        row = db.execute("SELECT setting_value FROM app_settings WHERE setting_key = ? FOR UPDATE", (key,)).fetchone()
+        try:
+            state = json.loads(row["setting_value"]) if row else {"failures": 0, "locked_until": 0}
+        except (TypeError, json.JSONDecodeError):
+            state = {"failures": 0, "locked_until": 0}
+        if float(state.get("locked_until", 0)) > time.time():
+            return
+        failures = int(state.get("failures", 0)) + 1
+        locked_until = 0
+        if failures >= 5:
+            failures = 0
+            locked_until = time.time() + 60
+        db.execute(
+            "UPDATE app_settings SET setting_value = ? WHERE setting_key = ?",
+            (json.dumps({"failures": failures, "locked_until": locked_until}), key),
+        )
+
+
+def clear_login_failures(scope, client, database_path=DATABASE_FILE):
+    key = _login_throttle_key(scope, client)
+    with connection(database_path) as db:
+        db.execute("DELETE FROM app_settings WHERE setting_key = ?", (key,))
+
+
 def save_recognition_proof(token, proof, database_path=DATABASE_FILE):
     key = "recognition_proof_" + hashlib.sha256(token.encode("utf-8")).hexdigest()
     value = json.dumps(proof, separators=(",", ":"))
