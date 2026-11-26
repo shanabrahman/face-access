@@ -438,8 +438,62 @@ def append_entry(event, status, name, score="", method="", details=""):
     attendance_db.log_access_event(row)
 
 
+def _session_key(role, token):
+    return f"session_{role}_{hashlib.sha256(token.encode('utf-8')).hexdigest()}"
+
+
+def _db_session(role, token):
+    if not token:
+        return None
+    raw = attendance_db.settings().get(_session_key(role, token), "")
+    try:
+        session = json.loads(raw) if raw else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(session, dict) or session.get("revoked"):
+        return None
+    try:
+        return session if float(session.get("expires", 0)) >= time.time() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_db_session(role, token, session):
+    attendance_db.update_settings({_session_key(role, token): json.dumps(session, separators=(",", ":"))})
+
+
+def _revoke_db_session(role, token):
+    session = _db_session(role, token)
+    if session is not None:
+        session["revoked"] = True
+        _save_db_session(role, token, session)
+
+
+def _revoke_db_sessions_for(role, field, value):
+    updates = {}
+    for key, raw in attendance_db.settings().items():
+        if not key.startswith(f"session_{role}_"):
+            continue
+        try:
+            session = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(session, dict) and session.get(field) == value and not session.get("revoked"):
+            session["revoked"] = True
+            updates[key] = json.dumps(session, separators=(",", ":"))
+    if updates:
+        attendance_db.update_settings(updates)
+
+
 def _is_admin_authenticated(request):
     token = request.cookies.get(SESSION_COOKIE, "")
+    if os.environ.get("DATABASE_URL"):
+        session = _db_session("admin", token)
+        if session is None:
+            return False
+        session["expires"] = time.time() + SESSION_SECONDS
+        _save_db_session("admin", token, session)
+        return True
     with admin_lock:
         expires = ADMIN_SESSIONS.get(token)
         if not token or not expires or expires < time.time():
@@ -496,47 +550,49 @@ def set_admin_pin(pin):
             os.remove(temp_path)
 
 
-def set_session(response):
+def set_session(response, secure=False):
     token = secrets.token_urlsafe(32)
-    with admin_lock:
-        ADMIN_SESSIONS[token] = time.time() + SESSION_SECONDS
-    response.set_cookie(
-        SESSION_COOKIE,
-        token,
-        max_age=SESSION_SECONDS,
-        httponly=True,
-        samesite="strict",
-        secure=False,
-        path="/",
-    )
+    expires = time.time() + SESSION_SECONDS
+    if os.environ.get("DATABASE_URL"):
+        _save_db_session("admin", token, {"expires": expires})
+    else:
+        with admin_lock:
+            ADMIN_SESSIONS[token] = expires
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_SECONDS,
+                        httponly=True, samesite="strict", secure=secure, path="/")
 
 
 def clear_employee_session(request, response):
     token = request.cookies.get(EMPLOYEE_SESSION_COOKIE, "")
-    with employee_session_lock:
-        EMPLOYEE_SESSIONS.pop(token, None)
+    if os.environ.get("DATABASE_URL"):
+        _revoke_db_session("employee", token)
+    else:
+        with employee_session_lock:
+            EMPLOYEE_SESSIONS.pop(token, None)
     response.delete_cookie(
         EMPLOYEE_SESSION_COOKIE, path="/", httponly=True, samesite="strict"
     )
 
 
 def revoke_employee_sessions(employee_id):
+    if os.environ.get("DATABASE_URL"):
+        _revoke_db_sessions_for("employee", "employee_id", employee_id)
+        return
     with employee_session_lock:
-        expired = [
-            token for token, session in EMPLOYEE_SESSIONS.items()
-            if session["employee_id"] == employee_id
-        ]
+        expired = [token for token, session in EMPLOYEE_SESSIONS.items()
+                   if session["employee_id"] == employee_id]
         for token in expired:
             EMPLOYEE_SESSIONS.pop(token, None)
 
 
 def set_employee_session(employee_id, response, secure=False):
     token = secrets.token_urlsafe(32)
-    with employee_session_lock:
-        EMPLOYEE_SESSIONS[token] = {
-            "employee_id": employee_id,
-            "expires": time.time() + SESSION_SECONDS,
-        }
+    session = {"employee_id": employee_id, "expires": time.time() + SESSION_SECONDS}
+    if os.environ.get("DATABASE_URL"):
+        _save_db_session("employee", token, session)
+    else:
+        with employee_session_lock:
+            EMPLOYEE_SESSIONS[token] = session
     response.set_cookie(
         EMPLOYEE_SESSION_COOKIE,
         token,
@@ -550,20 +606,30 @@ def set_employee_session(employee_id, response, secure=False):
 
 def _employee_from_request(request):
     token = request.cookies.get(EMPLOYEE_SESSION_COOKIE, "")
-    with employee_session_lock:
-        session = EMPLOYEE_SESSIONS.get(token)
-        if not token or session is None or session["expires"] < time.time():
-            EMPLOYEE_SESSIONS.pop(token, None)
+    if os.environ.get("DATABASE_URL"):
+        session = _db_session("employee", token)
+        if session is None:
             return None
-        employee_id = session["employee_id"]
+        employee_id = session.get("employee_id")
+    else:
+        with employee_session_lock:
+            session = EMPLOYEE_SESSIONS.get(token)
+            if not token or session is None or session["expires"] < time.time():
+                EMPLOYEE_SESSIONS.pop(token, None)
+                return None
+            employee_id = session["employee_id"]
     employee = attendance_db.employee_by_id(employee_id)
     account = attendance_db.employee_account(employee_id)
     if employee is None or account is None or not account["is_active"] or employee["status"] != "active":
         revoke_employee_sessions(employee_id)
         return None
-    with employee_session_lock:
-        if token in EMPLOYEE_SESSIONS:
-            EMPLOYEE_SESSIONS[token]["expires"] = time.time() + SESSION_SECONDS
+    if os.environ.get("DATABASE_URL"):
+        session["expires"] = time.time() + SESSION_SECONDS
+        _save_db_session("employee", token, session)
+    else:
+        with employee_session_lock:
+            if token in EMPLOYEE_SESSIONS:
+                EMPLOYEE_SESSIONS[token]["expires"] = time.time() + SESSION_SECONDS
     return employee
 
 
@@ -627,6 +693,9 @@ def set_hod_login_failure(client):
 
 
 def revoke_hod_sessions(hod_id):
+    if os.environ.get("DATABASE_URL"):
+        _revoke_db_sessions_for("hod", "hod_id", hod_id)
+        return
     with hod_session_lock:
         for token, session in list(HOD_SESSIONS.items()):
             if session["hod_id"] == hod_id:
@@ -635,8 +704,12 @@ def revoke_hod_sessions(hod_id):
 
 def set_hod_session(hod_id, response, secure=False):
     token = secrets.token_urlsafe(32)
-    with hod_session_lock:
-        HOD_SESSIONS[token] = {"hod_id": hod_id, "expires": time.time() + SESSION_SECONDS}
+    session = {"hod_id": hod_id, "expires": time.time() + SESSION_SECONDS}
+    if os.environ.get("DATABASE_URL"):
+        _save_db_session("hod", token, session)
+    else:
+        with hod_session_lock:
+            HOD_SESSIONS[token] = session
     response.set_cookie(
         HOD_SESSION_COOKIE, token, max_age=SESSION_SECONDS, httponly=True,
         samesite="strict", secure=secure, path="/",
@@ -645,19 +718,29 @@ def set_hod_session(hod_id, response, secure=False):
 
 def _hod_from_request(request):
     token = request.cookies.get(HOD_SESSION_COOKIE, "")
-    with hod_session_lock:
-        session = HOD_SESSIONS.get(token)
-        if not token or session is None or session["expires"] < time.time():
-            HOD_SESSIONS.pop(token, None)
+    if os.environ.get("DATABASE_URL"):
+        session = _db_session("hod", token)
+        if session is None:
             return None
-        hod_id = session["hod_id"]
+        hod_id = session.get("hod_id")
+    else:
+        with hod_session_lock:
+            session = HOD_SESSIONS.get(token)
+            if not token or session is None or session["expires"] < time.time():
+                HOD_SESSIONS.pop(token, None)
+                return None
+            hod_id = session["hod_id"]
     hod = attendance_db.hod_account_by_id(hod_id)
     if hod is None or not hod["is_active"]:
         revoke_hod_sessions(hod_id)
         return None
-    with hod_session_lock:
-        if token in HOD_SESSIONS:
-            HOD_SESSIONS[token]["expires"] = time.time() + SESSION_SECONDS
+    if os.environ.get("DATABASE_URL"):
+        session["expires"] = time.time() + SESSION_SECONDS
+        _save_db_session("hod", token, session)
+    else:
+        with hod_session_lock:
+            if token in HOD_SESSIONS:
+                HOD_SESSIONS[token]["expires"] = time.time() + SESSION_SECONDS
     return hod
 
 
@@ -1085,7 +1168,7 @@ def admin_setup(data: PinPayload, request: Request, response: Response):
         set_admin_pin(data.pin)
     LOGIN_FAILURES.pop(request.client.host if request.client else "unknown", None)
     clear_employee_session(request, response)
-    set_session(response)
+    set_session(response, secure=request.url.scheme == "https")
     return {"ok": True}
 
 
@@ -1113,7 +1196,7 @@ def admin_change_pin(data: ChangePinPayload, request: Request, response: Respons
     LOGIN_FAILURES.pop(client, None)
     LOGIN_LOCKOUTS.pop(client, None)
     clear_employee_session(request, response)
-    set_session(response)
+    set_session(response, secure=request.url.scheme == "https")
     return {"ok": True}
 
 
@@ -1135,15 +1218,18 @@ def admin_login(data: PinPayload, request: Request, response: Response):
     LOGIN_FAILURES.pop(client, None)
     LOGIN_LOCKOUTS.pop(client, None)
     clear_employee_session(request, response)
-    set_session(response)
+    set_session(response, secure=request.url.scheme == "https")
     return {"ok": True}
 
 
 @app.post("/admin/logout")
 def admin_logout(request: Request, response: Response):
     token = request.cookies.get(SESSION_COOKIE, "")
-    with admin_lock:
-        ADMIN_SESSIONS.pop(token, None)
+    if os.environ.get("DATABASE_URL"):
+        _revoke_db_session("admin", token)
+    else:
+        with admin_lock:
+            ADMIN_SESSIONS.pop(token, None)
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="strict")
     return {"ok": True}
 
@@ -1224,8 +1310,11 @@ def hod_login(data: HODLoginPayload, request: Request, response: Response):
 @app.post("/hod/auth/logout")
 def hod_logout(request: Request, response: Response):
     token = request.cookies.get(HOD_SESSION_COOKIE, "")
-    with hod_session_lock:
-        HOD_SESSIONS.pop(token, None)
+    if os.environ.get("DATABASE_URL"):
+        _revoke_db_session("hod", token)
+    else:
+        with hod_session_lock:
+            HOD_SESSIONS.pop(token, None)
     response.delete_cookie(HOD_SESSION_COOKIE, path="/", httponly=True, samesite="strict")
     return {"ok": True}
 
