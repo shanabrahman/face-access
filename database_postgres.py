@@ -223,7 +223,8 @@ class _PostgresConnection:
         sql = re.sub(r"\bCOLLATE\s+NOCASE\b", "", sql, flags=re.I)
         if ignore_insert and not re.search(r"\bON\s+CONFLICT\b", sql, re.I):
             sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
-        return self.raw.executemany(_qmark_to_format(sql), seq_of_params)
+        cursor = self.raw.cursor()
+        return cursor.executemany(_qmark_to_format(sql), seq_of_params)
 
     def executescript(self, script):
         result = None
