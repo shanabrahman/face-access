@@ -758,11 +758,52 @@ def validate_filters(start_date, end_date):
 def safe_attendance_photo_path(relative_path):
     if not relative_path or os.path.isabs(relative_path):
         raise ValueError("Attendance photo path is invalid.")
+    if os.environ.get("DATABASE_URL"):
+        value = str(relative_path).replace("\\", "/").strip("/")
+        if not value.startswith("attendance/") or any(part in ("", ".", "..") for part in value.split("/")):
+            raise ValueError("Attendance photo storage path is invalid.")
+        return value
     root = os.path.realpath(ATTENDANCE_PHOTO_DIR)
     path = os.path.realpath(os.path.join(root, relative_path))
     if os.path.commonpath((root, path)) != root or os.path.islink(path):
         raise ValueError("Attendance photo path is outside the evidence directory.")
     return path
+
+
+def attendance_photo_bytes(relative_path):
+    if not relative_path:
+        return None
+    path = safe_attendance_photo_path(relative_path)
+    if os.environ.get("DATABASE_URL"):
+        try:
+            return face_storage.download_bytes(
+                face_storage.BUCKET_ATTENDANCE_EVIDENCE, path
+            )
+        except Exception as exc:
+            # Missing objects are treated as unavailable; storage errors are logged.
+            print(f"Could not read attendance evidence object {path}: {exc}")
+            return None
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as file:
+        return file.read()
+
+
+def attendance_photo_response(relative_path, *, download=False):
+    content = attendance_photo_bytes(relative_path)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Attendance photo is no longer available.")
+    filename = os.path.basename(str(relative_path))
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content=content,
+        media_type="image/jpeg",
+        headers={
+            "Content-Disposition": f'{disposition}; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def decode_attendance_photo(photo_data, expected_name):
@@ -831,20 +872,31 @@ def decode_attendance_photo(photo_data, expected_name):
 
 
 def save_attendance_photo(action, employee_id, captured_at, image_bytes):
+    action_name = "checkin" if action == "check_in" else "checkout"
+    filename = (
+        f"{employee_id}_{captured_at.date().isoformat()}_{action_name}_"
+        f"{uuid.uuid4().hex}.jpg"
+    )
+    if os.environ.get("DATABASE_URL"):
+        object_path = (
+            f"attendance/{action_name}/{captured_at.year:04d}/"
+            f"{captured_at.month:02d}/{filename}"
+        )
+        return face_storage.upload_bytes(
+            face_storage.BUCKET_ATTENDANCE_EVIDENCE,
+            object_path,
+            image_bytes,
+            "image/jpeg",
+        )
     folder = os.path.join(
         ATTENDANCE_PHOTO_DIR,
-        "checkin" if action == "check_in" else "checkout",
+        action_name,
         f"{captured_at.year:04d}",
         f"{captured_at.month:02d}",
     )
     os.makedirs(folder, mode=0o700, exist_ok=True)
     if os.name == "posix":
         os.chmod(folder, 0o700)
-    action_name = "checkin" if action == "check_in" else "checkout"
-    filename = (
-        f"{employee_id}_{captured_at.date().isoformat()}_{action_name}_"
-        f"{uuid.uuid4().hex}.jpg"
-    )
     final_path = os.path.join(folder, filename)
     descriptor, temporary_path = tempfile.mkstemp(prefix=".attendance-photo-", dir=folder)
     try:
@@ -865,7 +917,11 @@ def remove_attendance_photo_file(relative_path):
     if not relative_path:
         return
     path = safe_attendance_photo_path(relative_path)
-    if os.path.exists(path):
+    if os.environ.get("DATABASE_URL"):
+        face_storage.delete_objects(
+            face_storage.BUCKET_ATTENDANCE_EVIDENCE, [path]
+        )
+    elif os.path.exists(path):
         os.remove(path)
 
 
@@ -897,18 +953,14 @@ def apply_attendance_photo_retention():
             relative_path = record[path_key]
             if not timestamp or not relative_path or datetime.fromisoformat(timestamp) >= cutoff:
                 continue
-            path = safe_attendance_photo_path(relative_path)
-            if os.path.exists(path):
-                os.remove(path)
+            remove_attendance_photo_file(relative_path)
             attendance_db.clear_attendance_photo(record["attendance_id"], action)
     for movement in attendance_db.attendance_movement_photo_records():
         if not movement["photo_timestamp"]:
             continue
         if datetime.fromisoformat(movement["photo_timestamp"]) >= cutoff:
             continue
-        path = safe_attendance_photo_path(movement["photo_path"])
-        if os.path.exists(path):
-            os.remove(path)
+        remove_attendance_photo_file(movement["photo_path"])
         attendance_db.clear_attendance_movement_photo(movement["movement_id"])
 
 
@@ -1523,13 +1575,9 @@ def hod_attendance_photo(attendance_id: int, action: Literal["check_in", "check_
     if not relative_path:
         raise HTTPException(status_code=404, detail="No attendance photo is available.")
     try:
-        path = safe_attendance_photo_path(relative_path)
+        return attendance_photo_response(relative_path)
     except ValueError as exc:
         raise HTTPException(status_code=500, detail="Attendance photo path is invalid.") from exc
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Attendance photo is no longer available.")
-    return FileResponse(path, media_type="image/jpeg", content_disposition_type="inline",
-                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/hod/reports/export")
@@ -2412,11 +2460,8 @@ def attendance_clock(data: AttendanceClock):
             employee["employee_id"]
         )
         if checkin_photo_path:
-            checkin_path = safe_attendance_photo_path(checkin_photo_path)
-            if os.path.isfile(checkin_path):
-                with open(checkin_path, "rb") as file:
-                    checkin_bytes = file.read(MAX_ATTENDANCE_PHOTO_BYTES + 1)
-                if hashlib.sha256(checkin_bytes).digest() == hashlib.sha256(photo_bytes).digest():
+            checkin_bytes = attendance_photo_bytes(checkin_photo_path)
+            if checkin_bytes and hashlib.sha256(checkin_bytes).digest() == hashlib.sha256(photo_bytes).digest():
                     raise HTTPException(
                         status_code=400,
                         detail=(
@@ -2550,8 +2595,7 @@ def attendance_record_response(record):
     ):
         relative_path = result.pop(path_key, None)
         if relative_path:
-            path = safe_attendance_photo_path(relative_path)
-            result[available_key] = os.path.isfile(path)
+            result[available_key] = attendance_photo_bytes(relative_path) is not None
         else:
             result[available_key] = False
     return result
@@ -2759,20 +2803,9 @@ def employee_attendance_photo(
     if not relative_path:
         raise HTTPException(status_code=404, detail="No attendance photo is available.")
     try:
-        path = safe_attendance_photo_path(relative_path)
+        return attendance_photo_response(relative_path)
     except ValueError as exc:
         raise HTTPException(status_code=500, detail="Attendance photo path is invalid.") from exc
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Attendance photo is no longer available.")
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        content_disposition_type="inline",
-        headers={
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
 
 
 @app.get("/employee/attendance/{attendance_id}/movement/{movement_id}/photo")
@@ -2791,20 +2824,9 @@ def employee_attendance_movement_photo(
     if not relative_path:
         raise HTTPException(status_code=404, detail="No movement photo is available.")
     try:
-        path = safe_attendance_photo_path(relative_path)
+        return attendance_photo_response(relative_path)
     except ValueError as exc:
         raise HTTPException(status_code=500, detail="Movement photo path is invalid.") from exc
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Movement photo is no longer available.")
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        content_disposition_type="inline",
-        headers={
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
 
 
 @app.get("/employee/leave-requests")
@@ -3212,8 +3234,7 @@ def attendance_record_detail(attendance_id: int, request: Request):
         relative_path = movement.pop("photo_path")
         movement["photo_available"] = False
         if relative_path:
-            path = safe_attendance_photo_path(relative_path)
-            movement["photo_available"] = os.path.isfile(path)
+            movement["photo_available"] = attendance_photo_bytes(relative_path) is not None
         movements.append(movement)
     return {
         "record": attendance_record_response(record),
@@ -3238,21 +3259,9 @@ def attendance_movement_photo(
     if not relative_path:
         raise HTTPException(status_code=404, detail="No movement photo is available.")
     try:
-        path = safe_attendance_photo_path(relative_path)
+        return attendance_photo_response(relative_path, download=download)
     except ValueError as exc:
         raise HTTPException(status_code=500, detail="Movement photo path is invalid.") from exc
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Movement photo is no longer available.")
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        filename=os.path.basename(path),
-        content_disposition_type="attachment" if download else "inline",
-        headers={
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
 
 
 @app.get("/attendance/record/{attendance_id}/photo/{action}")
@@ -3267,21 +3276,9 @@ def attendance_photo(
     if not relative_path:
         raise HTTPException(status_code=404, detail="No attendance photo is available.")
     try:
-        path = safe_attendance_photo_path(relative_path)
+        return attendance_photo_response(relative_path, download=download)
     except ValueError as exc:
         raise HTTPException(status_code=500, detail="Attendance photo path is invalid.") from exc
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Attendance photo is no longer available.")
-    return FileResponse(
-        path,
-        media_type="image/jpeg",
-        filename=os.path.basename(path),
-        content_disposition_type="attachment" if download else "inline",
-        headers={
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
 
 
 @app.delete("/attendance/record/{attendance_id}/photo/{action}")
