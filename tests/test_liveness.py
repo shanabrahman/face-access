@@ -19,6 +19,7 @@ class LivenessTests(unittest.TestCase):
         server.ACCESS_COOLDOWNS.clear()
 
     def test_pinned_model_loads_and_returns_a_bounded_score(self):
+        server.load_antispoof_model()
         with open(server.LIVENESS_MODEL, "rb") as model_file:
             model_hash = hashlib.sha256(model_file.read()).hexdigest()
 
