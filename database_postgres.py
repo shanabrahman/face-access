@@ -1714,11 +1714,25 @@ def record_attendance(employee_id, action, now=None, timezone_name="Asia/Qatar",
                 raise FileExistsError("This attendance record was already checked out.")
             attendance_id = existing["attendance_id"]
             returned_from_break = False
-    result = attendance_record(attendance_id, database_path)
+        result_row = db.execute(
+            """SELECT a.*, e.full_name, e.face_name, e.department, e.designation,
+                      s.name AS shift_name, s.start_time AS shift_start,
+                      s.end_time AS shift_end,
+                      s.grace_period_minutes, s.on_time_window_minutes
+               FROM attendance a
+               JOIN employees e ON e.employee_id = a.employee_id
+               JOIN shifts s ON s.shift_id = a.shift_id
+               WHERE a.attendance_id = ?""",
+            (attendance_id,),
+        ).fetchone()
+    result = dict(result_row)
+    result.update(classify_attendance(result))
     result["attendance_action_time"] = stamp
     if action == "check_in":
         result["returned_from_break"] = returned_from_break
-    reconcile_daily_attendance_summaries(database_path, day, employee_id)
+    reconcile_daily_attendance_summaries(
+        database_path, day, employee_id, timezone_name=timezone_name
+    )
     return result
 
 
@@ -1880,8 +1894,12 @@ def attendance_record(attendance_id, database_path=DATABASE_FILE):
         return result
 
 
-def reconcile_daily_attendance_summaries(database_path=DATABASE_FILE, day="", employee_id=""):
-    timezone = ZoneInfo(settings(database_path=database_path)["timezone"])
+def reconcile_daily_attendance_summaries(
+    database_path=DATABASE_FILE, day="", employee_id="", timezone_name=None
+):
+    timezone = ZoneInfo(
+        timezone_name or settings(database_path=database_path)["timezone"]
+    )
     local_now = datetime.now(timezone)
     with connection(database_path) as db:
         filters = []
