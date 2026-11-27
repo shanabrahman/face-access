@@ -527,6 +527,39 @@ def save_recognition_proof(token, proof, database_path=DATABASE_FILE):
             (key, value),
         )
 
+def employee_by_face_name_with_proof(face_name, token, proof, database_path=DATABASE_FILE):
+    """Fetch the employee and persist its single-use frame proof on one DB connection."""
+    global _last_recognition_proof_cleanup
+    key = "recognition_proof_" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+    value = json.dumps(proof, separators=(",", ":"))
+    with connection(database_path) as db:
+        employee_row = db.execute(
+            "SELECT * FROM employees WHERE face_name = ?", (face_name,)
+        ).fetchone()
+        now = time.monotonic()
+        if now - _last_recognition_proof_cleanup >= 60:
+            rows = db.execute(
+                "SELECT setting_key, setting_value FROM app_settings WHERE setting_key LIKE 'recognition_proof_%'"
+            ).fetchall()
+            expired = []
+            wall_clock = time.time()
+            for row in rows:
+                try:
+                    stored = json.loads(row["setting_value"])
+                    if float(stored.get("expires", 0)) < wall_clock:
+                        expired.append(row["setting_key"])
+                except (TypeError, ValueError, json.JSONDecodeError, AttributeError):
+                    expired.append(row["setting_key"])
+            for expired_key in expired:
+                db.execute("DELETE FROM app_settings WHERE setting_key = ?", (expired_key,))
+            _last_recognition_proof_cleanup = now
+        db.execute(
+            "INSERT INTO app_settings(setting_key, setting_value) VALUES (?, ?) "
+            "ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
+            (key, value),
+        )
+        return dict(employee_row) if employee_row else None
+
 
 def consume_recognition_proofs(tokens, database_path=DATABASE_FILE):
     results = {}
