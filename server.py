@@ -2682,9 +2682,29 @@ def attendance_clock(data: AttendanceClock):
         recognized_at = evidence[-1][3]
     proof_validation_ms = (time.perf_counter() - proof_started) * 1000
 
-    employee_lookup_started = time.perf_counter()
-    employee = attendance_db.employee_by_face_name(data.name)
-    employee_lookup_ms = (time.perf_counter() - employee_lookup_started) * 1000
+    # These database reads do not depend on photo verification. Run them in
+    # parallel while the live photo is checked to avoid serial network waits.
+    def timed_employee_lookup():
+        started = time.perf_counter()
+        result = attendance_db.employee_by_face_name(data.name)
+        return result, (time.perf_counter() - started) * 1000
+
+    def timed_settings_lookup():
+        started = time.perf_counter()
+        result = attendance_db.settings()
+        return result, (time.perf_counter() - started) * 1000
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        employee_future = executor.submit(timed_employee_lookup)
+        settings_future = executor.submit(timed_settings_lookup)
+        photo_verification_started = time.perf_counter()
+        photo_bytes, photo_score, liveness_score = decode_attendance_photo(
+            data.photo_data, data.name
+        )
+        photo_verification_ms = (time.perf_counter() - photo_verification_started) * 1000
+        employee, employee_lookup_ms = employee_future.result()
+        app_settings, settings_ms = settings_future.result()
+
     if employee is None or employee["status"] != "active":
         raise HTTPException(status_code=403, detail="Employee is not active.")
     if not employee["consent_at"]:
@@ -2692,14 +2712,7 @@ def attendance_clock(data: AttendanceClock):
             status_code=403,
             detail="Recorded employee consent is required before face attendance.",
         )
-    photo_verification_started = time.perf_counter()
-    photo_bytes, photo_score, liveness_score = decode_attendance_photo(
-        data.photo_data, data.name
-    )
-    photo_verification_ms = (time.perf_counter() - photo_verification_started) * 1000
-    settings_started = time.perf_counter()
-    timezone_name = attendance_db.settings()["timezone"]
-    settings_ms = (time.perf_counter() - settings_started) * 1000
+    timezone_name = app_settings["timezone"]
     captured_at = datetime.fromtimestamp(recognized_at, ZoneInfo(timezone_name))
     if data.action == "check_out":
         checkin_photo_path = attendance_db.open_attendance_photo_path(
