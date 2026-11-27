@@ -2426,7 +2426,7 @@ async function loadAttendance() {
       badge.textContent = {
         ON_TIME: 'PRESENT',
         GRACE_PERIOD: '⚠ PRESENT · GRACE',
-        LATE: 'LATE'
+        LATE: 'PRESENT'
       }[punctualityStatus] || attendanceStatusLabel(punctualityStatus);
       badge.title = {
         ON_TIME: 'Checked in during the on-time window.',
