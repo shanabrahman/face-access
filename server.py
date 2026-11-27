@@ -2714,12 +2714,14 @@ def attendance_clock(data: AttendanceClock):
         )
     timezone_name = app_settings["timezone"]
     captured_at = datetime.fromtimestamp(recognized_at, ZoneInfo(timezone_name))
+    checkin_photo_available = False
     if data.action == "check_out":
         checkin_photo_path = attendance_db.open_attendance_photo_path(
             employee["employee_id"]
         )
         if checkin_photo_path:
             checkin_bytes = attendance_photo_bytes(checkin_photo_path)
+            checkin_photo_available = checkin_bytes is not None
             if checkin_bytes and hashlib.sha256(checkin_bytes).digest() == hashlib.sha256(photo_bytes).digest():
                     raise HTTPException(
                         status_code=400,
@@ -2803,7 +2805,15 @@ def attendance_clock(data: AttendanceClock):
         "ok": True,
         "message": message,
         "tone": tone,
-        "attendance": attendance_record_response(record),
+        "attendance": attendance_record_response(
+            record,
+            {
+                "checkin_photo_available": (
+                    True if data.action == "check_in" else checkin_photo_available
+                ),
+                "checkout_photo_available": data.action == "check_out",
+            },
+        ),
     }
 
 
@@ -2859,14 +2869,17 @@ def dashboard_summary():
     return result
 
 
-def attendance_record_response(record):
+def attendance_record_response(record, known_photo_availability=None):
     result = dict(record)
+    known_photo_availability = known_photo_availability or {}
     for path_key, available_key in (
         ("checkin_photo_path", "checkin_photo_available"),
         ("checkout_photo_path", "checkout_photo_available"),
     ):
         relative_path = result.pop(path_key, None)
-        if relative_path:
+        if available_key in known_photo_availability:
+            result[available_key] = bool(known_photo_availability[available_key])
+        elif relative_path:
             result[available_key] = attendance_photo_bytes(relative_path) is not None
         else:
             result[available_key] = False
