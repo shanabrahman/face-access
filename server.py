@@ -1873,8 +1873,31 @@ def recognize(file: UploadFile = File(...)):
                     "liveness_status": "photo_check_required",
                     "box": [x, y, w, h],
                 }
+                should_issue_proof = (
+                    (reason is None and cooldown_remaining == 0)
+                    or (
+                        name != "Unknown"
+                        and STAFF_META.get(name, default_meta()).get("active", True)
+                    )
+                )
                 employee_lookup_started = time.perf_counter()
-                employee = attendance_db.employee_by_face_name(name) if name != "Unknown" else None
+                proof_started = time.perf_counter()
+                if name != "Unknown" and os.environ.get("DATABASE_URL") and should_issue_proof:
+                    token = secrets.token_urlsafe(24)
+                    proof = (name, round(score, 3), time.time() + 30, recognized_at)
+                    employee = attendance_db.employee_by_face_name_with_proof(
+                        name, token, {
+                            "name": proof[0], "score": proof[1],
+                            "expires": proof[2], "recognized_at": proof[3],
+                        }
+                    )
+                    result["proof"] = token
+                    proof_save_ms += (time.perf_counter() - proof_started) * 1000
+                else:
+                    employee = attendance_db.employee_by_face_name(name) if name != "Unknown" else None
+                    if should_issue_proof:
+                        result["proof"] = issue_recognition_proof(name, score, recognized_at)
+                        proof_save_ms += (time.perf_counter() - proof_started) * 1000
                 employee_lookup_ms += (time.perf_counter() - employee_lookup_started) * 1000
                 result["employee_id"] = employee["employee_id"] if employee else ""
                 result["attendance_allowed"] = bool(
@@ -1882,14 +1905,6 @@ def recognize(file: UploadFile = File(...)):
                     and employee["status"] == "active"
                     and employee["consent_at"]
                 )
-                if reason is None and cooldown_remaining == 0:
-                    proof_started = time.perf_counter()
-                    result["proof"] = issue_recognition_proof(name, score, recognized_at)
-                    proof_save_ms += (time.perf_counter() - proof_started) * 1000
-                elif name != "Unknown" and STAFF_META.get(name, default_meta()).get("active", True):
-                    proof_started = time.perf_counter()
-                    result["proof"] = issue_recognition_proof(name, score, recognized_at)
-                    proof_save_ms += (time.perf_counter() - proof_started) * 1000
                 results.append(result)
         model_ms = (time.perf_counter() - model_started) * 1000
         total_ms = (time.perf_counter() - request_started) * 1000
