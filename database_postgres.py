@@ -249,10 +249,10 @@ def _get_connection_pool():
             if _connection_pool is None:
                 pool = ConnectionPool(
                     conninfo=dsn,
-                    min_size=0,
+                    min_size=1,
                     max_size=2,
                     timeout=8,
-                    max_idle=60,
+                    max_idle=180,
                     max_lifetime=300,
                     kwargs={
                         "sslmode": os.environ.get("PGSSLMODE", "require"),
