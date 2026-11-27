@@ -1718,7 +1718,7 @@ def record_attendance(employee_id, action, now=None, timezone_name="Asia/Qatar",
     result["attendance_action_time"] = stamp
     if action == "check_in":
         result["returned_from_break"] = returned_from_break
-    reconcile_daily_attendance_summaries(database_path, day)
+    reconcile_daily_attendance_summaries(database_path, day, employee_id)
     return result
 
 
@@ -1880,12 +1880,19 @@ def attendance_record(attendance_id, database_path=DATABASE_FILE):
         return result
 
 
-def reconcile_daily_attendance_summaries(database_path=DATABASE_FILE, day=""):
+def reconcile_daily_attendance_summaries(database_path=DATABASE_FILE, day="", employee_id=""):
     timezone = ZoneInfo(settings(database_path=database_path)["timezone"])
     local_now = datetime.now(timezone)
     with connection(database_path) as db:
-        date_filter = " AND a.attendance_date = ?" if day else ""
-        params = (day,) if day else ()
+        filters = []
+        params = []
+        if day:
+            filters.append("a.attendance_date = ?")
+            params.append(day)
+        if employee_id:
+            filters.append("a.employee_id = ?")
+            params.append(employee_id)
+        where_clause = (" AND " + " AND ".join(filters)) if filters else ""
         rows = db.execute(
             """SELECT a.attendance_id, a.employee_id, a.attendance_date,
                       a.check_in, a.check_out, a.working_hours,
@@ -1898,8 +1905,8 @@ def reconcile_daily_attendance_summaries(database_path=DATABASE_FILE, day=""):
                FROM attendance a
                JOIN employees e ON e.employee_id = a.employee_id
                JOIN shifts s ON s.shift_id = a.shift_id
-               WHERE 1=1""" + date_filter,
-            params,
+               WHERE 1=1""" + where_clause,
+            tuple(params),
         ).fetchall()
         for row in rows:
             attendance = dict(row)
