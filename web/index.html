@@ -1253,10 +1253,9 @@ function updateCameraState(isOn) {
 
 async function loadDashboard() {
   try {
-    const [staffResponse, statsResponse] = await Promise.all([
-      fetch('/staff'),
-      fetch('/dashboard/stats')
-    ]);
+    const dashboardRequests = [fetch('/staff'), fetch('/dashboard/stats')];
+    if (adminAuthenticated) dashboardRequests.push(fetch('/staff/details'));
+    const [staffResponse, statsResponse, detailsResponse] = await Promise.all(dashboardRequests);
     if (!staffResponse.ok || !statsResponse.ok) {
       throw new Error('Could not load dashboard data.');
     }
@@ -1271,8 +1270,7 @@ async function loadDashboard() {
     document.getElementById('pending-corrections').textContent = stats.pending_corrections || 0;
     staffListEl.replaceChildren();
     let staffDetails = [];
-    if (adminAuthenticated) {
-      const detailsResponse = await fetch('/staff/details');
+    if (adminAuthenticated && detailsResponse) {
       if (detailsResponse.ok) {
         staffDetails = await detailsResponse.json();
       } else if (detailsResponse.status === 401) {
@@ -1598,11 +1596,13 @@ async function loadEmployees() {
     return;
   }
   document.getElementById('employees-auth-message').hidden = true;
-  [employeesCache, shiftsCache] = await Promise.all([
+  const [employeeRows, shiftRows] = await Promise.all([
     requestJson('/employees'),
     requestJson('/shifts')
   ]);
-  await loadHodAccounts();
+  employeesCache = employeeRows;
+  shiftsCache = shiftRows;
+  await Promise.all([loadHodAccounts(), loadEmployeeAccounts()]);
   const leaveEmployee = document.getElementById('leave-employee');
   const manualEmployee = document.getElementById('manual-attendance-employee');
   leaveEmployee.replaceChildren();
@@ -1618,7 +1618,6 @@ async function loadEmployees() {
   table.replaceChildren();
   if (!employeesCache.length) {
     emptyTableRow(table, 'No employee profiles are registered yet.', 13);
-    await loadEmployeeAccounts();
     return;
   }
   for (const employee of employeesCache) {
@@ -1639,6 +1638,8 @@ async function loadEmployees() {
       photo.width = 42;
       photo.height = 42;
       photo.className = 'employee-avatar';
+      photo.loading = 'lazy';
+      photo.decoding = 'async';
       photoCell.append(photo);
     } else {
       photoCell.textContent = 'No photo';
@@ -1694,7 +1695,6 @@ async function loadEmployees() {
     row.append(actions);
     table.append(row);
   }
-  await loadEmployeeAccounts();
 }
 
 async function loadEmployeeAccounts() {
@@ -3089,8 +3089,8 @@ async function loadHistory() {
   renderEntries(historyListEl, data.entries);
 }
 
-async function refreshAdminStatus() {
-  const response = await fetch('/admin/status');
+async function refreshAdminStatus(response = null) {
+  response = response || await fetch('/admin/status');
   if (!response.ok) throw new Error('Could not check administrator status.');
   const state = await response.json();
   adminPinConfigured = state.pin_configured;
@@ -4613,11 +4613,15 @@ document.getElementById('hod-detail-refresh').addEventListener('click', () => {
 
 updateCameraState(false);
 async function initializeApplication() {
-  await refreshAdminStatus();
-  const employeeState = await requestJson('/employee/auth/status');
+  const [adminResponse, employeeState, hodState] = await Promise.all([
+    fetch('/admin/status'),
+    requestJson('/employee/auth/status'),
+    requestJson('/hod/auth/status')
+  ]);
+  if (!adminResponse.ok) throw new Error('Could not check administrator status.');
+  await refreshAdminStatus(adminResponse);
   employeeAuthenticated = employeeState.authenticated;
   setEmployeeNavigation(employeeAuthenticated);
-  const hodState = await requestJson('/hod/auth/status');
   hodAuthenticated = hodState.authenticated;
   setHodNavigation(hodAuthenticated);
   if (employeeAuthenticated) {
