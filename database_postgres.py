@@ -2277,8 +2277,12 @@ def clear_attendance_records(database_path=DATABASE_FILE):
 def dashboard_stats(today, database_path=DATABASE_FILE):
     snapshot = daily_attendance(today, database_path=database_path)
     counts = snapshot["counts"]
+    with connection(database_path) as db:
+        total_employees = db.execute(
+            "SELECT COUNT(*) FROM employees WHERE status = 'active'"
+        ).fetchone()[0]
     return {
-        "total_employees": snapshot["total_scheduled"],
+        "total_employees": total_employees,
         "present_today": sum(
             counts[key] for key in
             ("ON_TIME", "GRACE_PERIOD", "LATE", "CURRENTLY_WORKING", "CHECKED_OUT")
